@@ -15,9 +15,9 @@ const int SERVO_MIN_ANGLE      = 30;  // Gioi han goc lai toi da sang trai (30 d
 const int SERVO_MAX_ANGLE      = 150; // Gioi han goc lai toi da sang phai (150 do)
 const bool SERVO_INVERT        = false; // false: +error (SHARP_R) quay phai, -error (SHARP_L) quay trai (doi true neu nguoc)
 
-const int MIN_START_PWM        = 65;  // Xung PWM toi thieu de thang luc ma sat dong co DC khi tien
-const int MIN_REVERSE_PWM      = 100; // Xung PWM toi thieu khi lui de xe giat lui manh me ngay lap tuc
-const unsigned long TIMEOUT_MS = 350; // Watchdog: Qua 350ms khong co tin hieu tu Pi -> TU DONG PHANH
+const int MIN_START_PWM        = 65;  
+const int MIN_REVERSE_PWM      = 100; 
+const unsigned long TIMEOUT_MS = 350; 
 
 Servo myServo;
 unsigned long lastPacketTime = 0;

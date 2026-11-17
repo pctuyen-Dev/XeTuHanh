@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Cong cu 1 file duy nhat: mo terminal tuong tac de chay, day len (push), tai ve (pull/clone) du an XeTuHanh."""
-
 from datetime import datetime
 import os
 import shutil
@@ -11,10 +8,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_URL = "https://github.com/pctuyen-Dev/XeTuHanh.git"
 PYTHON_EXE = sys.executable
 
-
 def ensure_terminal():
-    """Neu file duoc chay bang pythonw (khong co console), tu dong mo cua so terminal moi."""
-    if os.name == "nt" and len(sys.argv) == 1 and (sys.stdin is None or sys.stdout is None):
+    """Neu file duoc chay ma khong co cua so terminal (vd pythonw / click chuot), tu dong mo terminal moi."""
+    if os.name == "nt" and (sys.stdin is None or not sys.stdin.isatty()):
         py_cmd = PYTHON_EXE
         if py_cmd.lower().endswith("pythonw.exe"):
             py_cmd = py_cmd[:-5] + ".exe"
