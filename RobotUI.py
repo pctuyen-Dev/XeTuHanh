@@ -4,12 +4,10 @@ import numpy as np
 
 
 class RobotDashboardUI:
-    """Quan ly cua so GUI giam sat da chieu va tuong tac chuot/phim cho RobotMain."""
 
     TOP_H = 40
     BOT_H = 36
 
-    # Kich thuoc che do Chi tiet (Full Dashboard: 1020 x 556)
     LEFT_W = 560
     RIGHT_W = 460
     TOTAL_W = LEFT_W + RIGHT_W  # 1020
@@ -19,7 +17,6 @@ class RobotDashboardUI:
     CTRL_H = 220
     BODY_H = MAIN_H + PIPE_H    # 480
 
-    # Kich thuoc che do Thu gon (Compact: 640 x 396)
     COMPACT_W = 640
     COMPACT_H = 320
 

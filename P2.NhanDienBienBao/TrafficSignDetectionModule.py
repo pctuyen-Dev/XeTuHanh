@@ -2,9 +2,7 @@ import os
 import cv2
 import numpy as np
 
-# ==============================================================================
 # DANH SÁCH 21 BIỂN BÁO GIAO THÔNG (15 BIỂN GỐC + 6 BIỂN MỚI) + LỚP UNKNOWN (0)
-# ==============================================================================
 CLASSES_15 = [
     'unknown',          # 0  - Nhiễu môi trường / Không phải biển báo
     'left',             # 1  - Rẽ trái bắt buộc
@@ -27,7 +25,7 @@ CLASSES_15 = [
     'speed_20',         # 18 - Giới hạn tốc độ tối đa 20 km/h
     'end_speed_limit',  # 19 - Hết giới hạn tốc độ
     'no_parking',       # 20 - Cấm đỗ xe
-    'intersection',     # 21 - Giao lộ / Giao nhau (+)
+    'intersection',     # 21 - Giao lộ / Giao nhau
 ]
 
 SIGN_INFO = {
@@ -434,11 +432,7 @@ def get_boxes_from_mask(mask, image=None, verify_geometry=True):
 
     return _non_max_suppression_boxes(bboxes, iou_thresh=0.45)
 
-
-# ==============================================================================
 # BỘ XÁC THỰC & CHỐNG NHẬN DIỆN SAI BIỂN TỐC ĐỘ (5, 10, 20, 30, 60 KM/H)
-# ==============================================================================
-
 def _has_enclosed_bottom_loop(bin_patch_32x48):
     """
     Kiểm tra xem chữ số bên trái (đã chuẩn hóa 32x48, 1=mực đen, 0=nền trắng)
