@@ -1,6 +1,18 @@
+import time
 import cv2
 import numpy as np
 import utils
+
+
+ZONE_SPECS = (
+    ("Z1", 0.80),  # Gan nhat (sat mui xe, tranh de chu HUD o day anh)
+    ("Z2", 0.68),  # Can trung (vung chuan bi / vao cua)
+    ("Z3", 0.56),  # Trung binh (tinh goc huong heading)
+    ("Z4", 0.44),  # Trung xa (canh bao cua som)
+    ("Z5", 0.32),  # Xa (nhin truoc khuc cua)
+)
+ZONE_WEIGHTS_STRAIGHT = (0.36, 0.32, 0.20, 0.09, 0.03)
+ZONE_WEIGHTS_CORNER = (0.22, 0.30, 0.26, 0.15, 0.07)
 
 
 PRESET_ROBOT_TOY = {
@@ -36,6 +48,16 @@ class LaneDetector:
         self.tape_width_ab = (0.045, 3.5)
         self.smooth_e_px = None
         self.smooth_e_norm = None
+        self.smooth_heading_norm = 0.0
+        self._prev_e_lat = None
+        self._prev_obs_t = None
+        self._d_err_filt = 0.0
+        self._prev_steer_out = 0.0
+        self.zone_widths = None
+        self.zone_width_hits = [0] * len(ZONE_SPECS)
+        self.last_zones = []
+        self._bev_cache_key = None
+        self._bev_matrix = None
         self.left_segments = []
         self.right_segments = []
         self.single_edge_side = None
@@ -67,6 +89,8 @@ class LaneDetector:
             "lane_state": "UNKNOWN",
             "center_offset_px": 0.0,
             "center_offset_norm": 0.0,
+            "heading_norm": 0.0,
+            "steer_offset_norm": 0.0,
             "offset_direction": "CAN GIUA",
             "vehicle_ref_x": 240.0,
             "lowest_center_point": None,
@@ -74,8 +98,9 @@ class LaneDetector:
             "tape_width_px": 0.0,
             "left_segments": [],
             "right_segments": [],
+            "distance_zones": [],
             "centerline_predicted": False,
-            "corner": {"direction": "UNKNOWN", "confidence": 0.0},
+            "corner": {"direction": "UNKNOWN", "state": "NONE", "confidence": 0.0},
             "lighting": {"mode": "NORMAL", "med_l": 110.0, "p98_l": 190.0},
         }
 
@@ -109,6 +134,7 @@ class LaneDetector:
         curr_x = float(seed_x)
         dx_per_y = 0.0
         miss_rows = 0
+        thin_reject_streak = 0
 
         def _has_dash_support(cx_val, y_val):
             for y_chk in (y_val - 2, y_val - 4):
@@ -131,8 +157,10 @@ class LaneDetector:
                 gate = 14.0 + min(22.0, miss_rows * slope_unc)
 
             med_rw_live = float(np.median([it[5] for it in raw_obs[-6:]])) if raw_obs else None
+            med_pw_live = float(np.median([it[2] for it in raw_obs[-6:]])) if raw_obs else None
             best = None
             best_d = gate
+            saw_thin_glare = False
             for y_scan in (y, y - 1):
                 if y_scan < 0:
                     continue
@@ -141,6 +169,11 @@ class LaneDetector:
                     if d < best_d:
                         if miss_rows >= 4 and med_rw_live is not None and item[4] > max(20.0, med_rw_live * 2.2):
                             continue
+                        # Chan nhieu song bong loang qua mong (< 38% be day vach truoc do) o nua tren
+                        if len(raw_obs) >= 8 and y < int(hT * 0.45) and med_pw_live is not None and med_pw_live >= 6.5:
+                            if item[1] < max(3.6, 0.38 * med_pw_live):
+                                saw_thin_glare = True
+                                continue
                         best_d = d
                         best = item
                 if best is not None:
@@ -151,6 +184,7 @@ class LaneDetector:
                 best = None
 
             if best is not None:
+                thin_reject_streak = 0
                 cx, perp_w, s, e, rw = best
                 if gray is not None and road_med_gray is not None:
                     inward_dir = +1 if side == "LEFT" else -1
@@ -162,6 +196,14 @@ class LaneDetector:
                         if tape_med - inward_med < 20.0 and inward_med > road_med_gray + 42.0:
                             break
 
+                # Neu mot dom bong dinh vao mot mep vach lam rw phong to dot ngot, neo tam theo mep gan pred_x
+                if len(raw_obs) >= 5 and med_rw_live is not None and med_pw_live is not None:
+                    if rw > med_rw_live * 1.48 and perp_w < med_pw_live * 0.78:
+                        cand_l = float(s) + 0.5 * med_rw_live
+                        cand_r = float(e) - 0.5 * med_rw_live
+                        cx = cand_l if abs(cand_l - pred_x) <= abs(cand_r - pred_x) else cand_r
+                        perp_w = med_pw_live
+
                 if len(raw_obs) >= 1:
                     prev_x, prev_y = raw_obs[-1][0], raw_obs[-1][1]
                     dy_step = max(1.0, float(prev_y - y))
@@ -169,19 +211,28 @@ class LaneDetector:
                     inst_dx = float(np.clip((cx - prev_x) / dy_step, -max_slope, max_slope))
                     if len(raw_obs) <= 2 and dy_step >= 8.0:
                         dx_per_y = 0.30 * dx_per_y + 0.70 * inst_dx
+                    elif len(raw_obs) >= 6:
+                        delta_s = float(np.clip(inst_dx - dx_per_y, -0.26, 0.26))
+                        dx_per_y = dx_per_y + 0.30 * delta_s
                     else:
                         dx_per_y = 0.58 * dx_per_y + 0.42 * inst_dx
                 curr_x = cx
                 raw_obs.append((float(cx), float(y), float(np.clip(perp_w, 2.0, 28.0)), s, e, rw))
                 miss_rows = 0
             else:
+                if saw_thin_glare and y < int(hT * 0.40) and len(raw_obs) >= 12:
+                    thin_reject_streak += 1
+                    if thin_reject_streak >= 3:
+                        break
                 curr_x = float(np.clip(pred_x, 0.0, wT - 1.0))
                 miss_rows += 2
-                # Cho phep nhay qua khe ho net dut thich ung theo phoi canh (gan ~48px, xa ~24px)
-                if len(raw_obs) >= 2:
-                    max_miss = int(round(18 + 30 * (y / float(max(1, hT)))))
+                # Cho phep nhay qua khe ho net dut / diem loa bong khi than vach da duoc xac nhan (>= 6 diem)
+                if len(raw_obs) >= 6:
+                    max_miss = int(round(22 + 34 * (y / float(max(1, hT)))))
+                elif len(raw_obs) >= 3:
+                    max_miss = 12
                 else:
-                    max_miss = 6 if y > int(hT * 0.68) else 2
+                    max_miss = 4
                 if miss_rows > max_miss:
                     break
 
@@ -194,38 +245,51 @@ class LaneDetector:
 
         pts = []
         widths = []
-        for cx, y, perp_w, s, e, rw in raw_obs:
+        raw_kept = []
+        for it in raw_obs:
+            cx, y, perp_w, s, e, rw = it
             if ref_rw is not None and rw < ref_rw * 0.88:
                 if s <= 1:
                     true_cx = float(e) - 0.5 * ref_rw
                     if true_cx < -0.5:
                         continue
                     cx = max(0.0, true_cx)
-                    perp_w = max(perp_w, float(np.median([it[2] for it in raw_obs[:12] if it[3] > 2] or [perp_w])))
+                    perp_w = max(perp_w, float(np.median([x[2] for x in raw_obs[:12] if x[3] > 2] or [perp_w])))
                 elif e >= wT - 1:
                     true_cx = float(s) + 0.5 * ref_rw
                     if true_cx > wT - 0.5:
                         continue
                     cx = min(float(wT - 1), true_cx)
-                    perp_w = max(perp_w, float(np.median([it[2] for it in raw_obs[:12] if it[4] < wT - 2] or [perp_w])))
+                    perp_w = max(perp_w, float(np.median([x[2] for x in raw_obs[:12] if x[4] < wT - 2] or [perp_w])))
             pts.append((float(cx), float(y)))
             widths.append(float(perp_w))
+            raw_kept.append(it)
 
         if len(pts) < 4:
             return np.empty((0, 2), dtype=np.float32), np.empty((0,), dtype=np.float32)
 
-        # Try horizontal/diagonal turn-arm continuation from either pts[-1] or the elbow near the top
+        # Try horizontal/diagonal turn-arm continuation from pts[-1], top elbow, or widened corner junction
         cand_indices = [len(pts) - 1]
         if len(pts) >= 8:
-            top_window = pts[max(0, len(pts) - 7) :]
+            win_start = max(0, len(pts) - 16)
+            top_window = pts[win_start:]
             if side == "RIGHT":
                 min_i = int(np.argmin([p[0] for p in top_window]))
-                eb_i = max(0, len(pts) - 7) + min_i
+                eb_i = win_start + min_i
             else:
                 max_i = int(np.argmax([p[0] for p in top_window]))
-                eb_i = max(0, len(pts) - 7) + max_i
+                eb_i = win_start + max_i
             if eb_i not in cand_indices:
                 cand_indices.append(eb_i)
+
+            base_rw = float(
+                np.median([it[5] for it in raw_kept[max(0, len(raw_kept) - 24) : max(1, len(raw_kept) - 6)]])
+            )
+            for wi in range(max(4, len(pts) - 18), len(pts) - 1):
+                if raw_kept[wi][5] >= max(22.0, 1.45 * base_rw) and pts[wi][1] < hT * 0.42:
+                    for ci in (wi, min(len(pts) - 1, wi + 1)):
+                        if ci not in cand_indices:
+                            cand_indices.append(ci)
 
         best_full_pts = pts
         best_full_widths = widths
@@ -233,6 +297,14 @@ class LaneDetector:
 
         for start_idx in cand_indices:
             top_x, top_y = pts[start_idx]
+            top_w = float(np.median(widths[max(0, start_idx - 5) : start_idx + 1]))
+            # Bo qua nhanh re som neu phia tren junction van la doan vach day va dai
+            tail_w = widths[start_idx + 1 :]
+            if len(tail_w) > 12 or (len(tail_w) >= 4 and float(np.median(tail_w)) >= 7.5):
+                continue
+            stem_base = pts[max(0, start_idx - 10)]
+            stem_vec = np.array([top_x - stem_base[0], top_y - stem_base[1]], dtype=np.float32)
+            stem_len = float(np.linalg.norm(stem_vec))
             for dir_x in (+1, -1):
                 arm_pts = []
                 arm_w = []
@@ -293,7 +365,15 @@ class LaneDetector:
                         if miss_cols > max_miss_c:
                             break
                 if len(arm_pts) >= 5:
-                    span_x = abs(arm_pts[-1][0] - pts[cand_indices[-1]][0])
+                    if float(np.median(arm_w)) < max(3.4, 0.35 * top_w):
+                        continue
+                    arm_vec = np.array([arm_pts[-1][0] - top_x, arm_pts[-1][1] - top_y], dtype=np.float32)
+                    arm_len = float(np.linalg.norm(arm_vec))
+                    if stem_len >= 12.0 and arm_len >= 12.0:
+                        cos_turn = float(np.dot(stem_vec, arm_vec) / (stem_len * arm_len))
+                        if cos_turn < -0.35:
+                            continue
+                    span_x = abs(arm_pts[-1][0] - top_x)
                     if span_x >= 18.0 and span_x > best_reach_x:
                         best_reach_x = span_x
                         best_full_pts = pts[: start_idx + 1] + arm_pts
@@ -311,36 +391,64 @@ class LaneDetector:
         scan_top_y = max(int(hT * 0.30), min(int(top_y_hint), int(hT * 0.58)))
         bot_y = int(hT * 0.97)
 
-        def _is_valid_trace(pts_try):
+        def _trace_metrics(pts_try):
             if len(pts_try) < 5:
-                return False
+                return None
             span_y = float(pts_try[0, 1] - np.min(pts_try[:, 1]))
             path_len = float(np.linalg.norm(np.diff(pts_try, axis=0), axis=1).sum())
-            return span_y >= 16.0 and path_len >= 24.0
+            if span_y < 16.0 or path_len < 24.0:
+                return None
+            return span_y, path_len, path_len + 0.35 * span_y
 
-        left_seed = None
-        right_seed = None
+        def _should_skip_near(cx_val, y_val, seen):
+            return any(abs(cx_val - sx) <= 18.0 and (sy - y_val) <= 14 for sx, sy in seen)
+
+        best_left = None   # (score, pts_try, w_try)
+        best_right = None  # (score, pts_try, w_try)
+        left_done = False
+        right_done = False
+        seen_left = []
+        seen_right = []
 
         for y in range(bot_y, scan_top_y, -2):
             runs = cls._extract_row_runs_with_dist(mask[y], dist[y], y, hT)
             if not runs:
                 continue
-            if left_seed is None:
+            if not left_done:
                 l_runs = [r for r in runs if r[0] <= mid_x - 16]
                 for cx, perp_w, s, e, rw in sorted(l_runs, key=lambda r: -r[0]):
+                    if _should_skip_near(cx, y, seen_left):
+                        continue
                     pts_try, w_try = cls._trace_stem_and_turn(mask, dist, gray, road_med_gray, cx, y, "LEFT", top_limit_y=4)
-                    if _is_valid_trace(pts_try):
-                        left_seed = (pts_try, w_try)
+                    seen_left.append((cx, y))
+                    m = _trace_metrics(pts_try)
+                    if m is not None:
+                        span_y, path_len, score = m
+                        if best_left is None or score > best_left[0]:
+                            best_left = (score, pts_try, w_try)
+                        if path_len >= 95.0 and span_y >= 60.0:
+                            left_done = True
                         break
-            if right_seed is None:
+            if not right_done:
                 r_runs = [r for r in runs if r[0] >= mid_x + 16]
                 for cx, perp_w, s, e, rw in sorted(r_runs, key=lambda r: r[0]):
+                    if _should_skip_near(cx, y, seen_right):
+                        continue
                     pts_try, w_try = cls._trace_stem_and_turn(mask, dist, gray, road_med_gray, cx, y, "RIGHT", top_limit_y=4)
-                    if _is_valid_trace(pts_try):
-                        right_seed = (pts_try, w_try)
+                    seen_right.append((cx, y))
+                    m = _trace_metrics(pts_try)
+                    if m is not None:
+                        span_y, path_len, score = m
+                        if best_right is None or score > best_right[0]:
+                            best_right = (score, pts_try, w_try)
+                        if path_len >= 95.0 and span_y >= 60.0:
+                            right_done = True
                         break
-            if left_seed is not None and right_seed is not None:
+            if left_done and right_done:
                 break
+
+        left_seed = (best_left[1], best_left[2]) if best_left is not None else None
+        right_seed = (best_right[1], best_right[2]) if best_right is not None else None
 
         # Fallback: Neu xe bi lech sat vao vach ke duong (vach nam ngay giua anh mid_x +- 16)
         if left_seed is None and right_seed is None:
@@ -350,7 +458,7 @@ class LaneDetector:
                 for cx, perp_w, s, e, rw in c_runs:
                     side_guess = "LEFT" if cx <= mid_x else "RIGHT"
                     pts_try, w_try = cls._trace_stem_and_turn(mask, dist, gray, road_med_gray, cx, y, side_guess, top_limit_y=4)
-                    if _is_valid_trace(pts_try):
+                    if _trace_metrics(pts_try) is not None:
                         if side_guess == "LEFT":
                             left_seed = (pts_try, w_try)
                         else:
@@ -1024,14 +1132,17 @@ class LaneDetector:
 
         return "RIGHT" if score > 0.0 else "LEFT"
 
-    def inspect_corner(self, mask, fresh_observation=True):
+    def inspect_corner(self, mask, points=None, fresh_observation=True):
         """
-        Evaluate corner direction, elbow coordinates, and distance-to-corner gating:
-          - Distinguishes FAR / APPROACH corners (where car must keep driving straight on the stem)
-            from TURN_NOW corners (where the corner apex has reached the turn-in zone in front of the car).
+        Evaluate corner direction, BEV-calibrated turn angle, true elbow apex, and distance-to-corner gating:
+          - Transforms segment vectors into Bird's-Eye View (BEV) via `points` when available so
+            perspective compression never inflates mild mid-lane folds (e.g. y=97) over the true corner apex.
+          - Distinguishes FAR / APPROACH (blind-spot compensation) / TURN_NOW corners.
         """
         h, w = mask.shape
+        bev_m = self._get_bev_matrix(points, w, h) if points is not None else None
         evidence = {"LEFT": [], "RIGHT": []}
+        apex_details = {"LEFT": [], "RIGHT": []}
         stem_spans = {"LEFT": [], "RIGHT": []}
         start_ys = {"LEFT": [], "RIGHT": []}
         votes = []
@@ -1043,15 +1154,25 @@ class LaneDetector:
             if not segs:
                 votes.append("UNKNOWN")
                 continue
-            best_turn = 0.0
+            best_score = -1.0
             best_dir = "UNKNOWN"
             best_elbow = None
             best_stem_span = 0.0
+            best_detail = None
             p_start = segs[0]["p1"]
             p_end = segs[-1]["p2"]
             dx_all = float(p_end[0] - p_start[0])
             dy_up_all = max(1.0, float(p_start[1] - p_end[1]))
             slope_ratio_all = abs(dx_all) / dy_up_all
+
+            # Approach stem vector (raw & BEV) for measuring total deflection across chamfered bends
+            v_stem_raw = np.array(segs[0]["p2"], dtype=np.float32) - np.array(segs[0]["p1"], dtype=np.float32)
+            bv_stem = None
+            if bev_m is not None:
+                b0 = cv2.perspectiveTransform(np.array([[segs[0]["p1"], segs[0]["p2"]]], dtype=np.float32), bev_m)[0]
+                cand_stem = b0[1] - b0[0]
+                if float(np.linalg.norm(cand_stem)) >= 4.0:
+                    bv_stem = cand_stem
 
             if len(segs) >= 2:
                 for s1, s2 in zip(segs[:-1], segs[1:]):
@@ -1061,15 +1182,61 @@ class LaneDetector:
                     if l1 < 12.0 or l2 < 12.0:
                         continue
                     cos_a = float(np.clip(np.dot(v1, v2) / (l1 * l2), -1.0, 1.0))
-                    ang_deg = float(np.rad2deg(np.arccos(cos_a)))
-                    # Nhanh tren cua goc cua phai vat cheo/ngang ro ret (abs(v2[0]) >= abs(v2[1]) * 0.90)
-                    if ang_deg >= 18.0 and abs(v2[0]) >= abs(v2[1]) * 0.90:
+                    raw_deg = float(np.rad2deg(np.arccos(cos_a)))
+
+                    if bev_m is not None:
+                        bpts = cv2.perspectiveTransform(
+                            np.array([[s1["p1"], s1["p2"], s2["p2"]]], dtype=np.float32), bev_m
+                        )[0]
+                        bv1, bv2 = bpts[1] - bpts[0], bpts[2] - bpts[1]
+                        bl1, bl2 = float(np.linalg.norm(bv1)), float(np.linalg.norm(bv2))
+                        if bl1 < 4.0 or bl2 < 4.0:
+                            continue
+                        loc_deg = float(np.rad2deg(np.arccos(float(np.clip(np.dot(bv1, bv2) / (bl1 * bl2), -1.0, 1.0)))))
+                        if bv_stem is not None:
+                            bsl = float(np.linalg.norm(bv_stem))
+                            tot_deg = float(
+                                np.rad2deg(np.arccos(float(np.clip(np.dot(bv_stem, bv2) / (bsl * bl2), -1.0, 1.0))))
+                            )
+                        else:
+                            tot_deg = loc_deg
+                        cross = float(bv1[0] * bv2[1] - bv1[1] * bv2[0])
+                        direction = "RIGHT" if cross > 0.0 else "LEFT"
+                        sideways_ratio = abs(float(bv2[0])) / max(1.0, abs(float(bv2[1])))
+                        valid_turn = loc_deg >= 18.0 and tot_deg >= 24.0 and (
+                            sideways_ratio >= 0.45 or abs(float(v2[0])) >= abs(float(v2[1])) * 0.90
+                        )
+                    else:
+                        loc_deg = raw_deg
+                        sl0 = float(np.linalg.norm(v_stem_raw))
+                        tot_deg = (
+                            float(np.rad2deg(np.arccos(float(np.clip(np.dot(v_stem_raw, v2) / (sl0 * l2), -1.0, 1.0)))))
+                            if sl0 >= 12.0
+                            else loc_deg
+                        )
                         direction = "RIGHT" if v2[0] > 0 else "LEFT"
-                        if ang_deg > best_turn:
-                            best_turn = ang_deg
+                        sideways_ratio = abs(float(v2[0])) / max(1.0, abs(float(v2[1])))
+                        valid_turn = loc_deg >= 18.0 and abs(v2[0]) >= abs(v2[1]) * 0.90
+
+                    if valid_turn:
+                        # Uu tien dinh thoat cua thuc su (tong goc BEV lon va nhanh ra vat ngang ro) thay vi nep gap giua than
+                        score = loc_deg + 0.65 * tot_deg + 25.0 * min(1.6, sideways_ratio)
+                        if score > best_score:
+                            best_score = score
                             best_dir = direction
                             best_elbow = (float(s1["p2"][0]), float(s1["p2"][1]))
                             best_stem_span = max(0.0, float(segs[0]["p1"][1] - s1["p2"][1]))
+                            best_detail = {
+                                "side": b_side,
+                                "prev": (float(s1["p1"][0]), float(s1["p1"][1])),
+                                "stem_dir": (float(v_stem_raw[0]), float(v_stem_raw[1])),
+                                "apex": best_elbow,
+                                "next": (float(s2["p2"][0]), float(s2["p2"][1])),
+                                "direction": direction,
+                                "local_bev_deg": float(loc_deg),
+                                "total_bev_deg": float(tot_deg),
+                                "raw_deg": float(raw_deg),
+                            }
 
             # Phan biet ro:
             # - Vach thang khi xe di lech 1 ben: xuat phat o mep duoi (p_start[1] >= 0.85*h) va co phuong gan nhu thang dung (slope_ratio_all < 1.20)
@@ -1091,10 +1258,30 @@ class LaneDetector:
                         float(0.65 * p_start[1] + 0.35 * p_end[1]),
                     )
                     best_stem_span = 0.0
+                if best_dir in ("LEFT", "RIGHT") and best_elbow is not None:
+                    if bev_m is not None:
+                        bse = cv2.perspectiveTransform(np.array([[p_start, p_end]], dtype=np.float32), bev_m)[0]
+                        bv_se = bse[1] - bse[0]
+                        est_deg = float(abs(np.rad2deg(np.arctan2(bv_se[0], max(1e-3, -bv_se[1])))))
+                    else:
+                        est_deg = float(np.rad2deg(np.arctan2(abs(dx_all), dy_up_all)))
+                    best_detail = {
+                        "side": b_side,
+                        "prev": (float(best_elbow[0]), float(min(h - 2, best_elbow[1] + 24.0))),
+                        "stem_dir": (0.0, -24.0),
+                        "apex": best_elbow,
+                        "next": (float(p_end[0]), float(p_end[1])),
+                        "direction": best_dir,
+                        "local_bev_deg": est_deg,
+                        "total_bev_deg": est_deg,
+                        "raw_deg": float(np.rad2deg(np.arctan2(abs(dx_all), dy_up_all))),
+                    }
 
             if best_dir != "UNKNOWN" and best_elbow is not None:
                 votes.append(best_dir)
                 evidence[best_dir].append(best_elbow)
+                if best_detail is not None:
+                    apex_details[best_dir].append(best_detail)
                 stem_spans[best_dir].append(best_stem_span)
                 start_ys[best_dir].append(float(p_start[1]))
             else:
@@ -1181,9 +1368,18 @@ class LaneDetector:
         min_start_y = float(h)
         distance_zone = "NONE"
         turn_now = False
+        angle_deg = 0.0
+        turn_angle_deg = 0.0
+        interior_angle_deg = 180.0
+        selected_apex_points = []
 
         if candidate in ("LEFT", "RIGHT") and evidence[candidate]:
             elbows = evidence[candidate]
+            selected_apex_points = list(apex_details.get(candidate, []))
+            if selected_apex_points:
+                angle_deg = float(max(ap["local_bev_deg"] for ap in selected_apex_points))
+                turn_angle_deg = float(max(ap["total_bev_deg"] for ap in selected_apex_points))
+                interior_angle_deg = float(max(0.0, 180.0 - turn_angle_deg))
             elbow_y = float(np.max([pt[1] for pt in elbows]))
             elbow_x = float(np.mean([pt[0] for pt in elbows]))
             elbow_y_ratio = elbow_y / float(max(1, h))
@@ -1199,7 +1395,7 @@ class LaneDetector:
                 # bat dau dem frame de cho xe tiep tuc di thang them 1 doan qua diem mu 15cm roi moi be lai.
                 if elbow_y_ratio >= 0.55:
                     self._blind_spot_wait_frames += 1
-                elif elbow_y_ratio < 0.38:
+                elif elbow_y_ratio < 0.35:
                     self._blind_spot_wait_frames = 0
 
             # KHI DA DI THANG QUA HET 15CM DIEM MU:
@@ -1218,7 +1414,7 @@ class LaneDetector:
                 confirmed = True
                 self._active_turn_dir = candidate
                 self._active_turn_hold = 6
-            elif elbow_y_ratio >= 0.35:
+            elif elbow_y_ratio >= 0.32:
                 distance_zone = "APPROACH"
                 turn_now = False
             else:
@@ -1240,6 +1436,7 @@ class LaneDetector:
 
         return {
             "direction": candidate if confirmed else "UNKNOWN",
+            "state": distance_zone,
             "candidate": candidate,
             "intent_direction": self._intent_turn_dir,
             "single_edge_hypothesis": hypothesis,
@@ -1256,6 +1453,10 @@ class LaneDetector:
             "stem_span_y": stem_span_y,
             "distance_zone": distance_zone,
             "turn_now": bool(turn_now),
+            "angle_deg": angle_deg,
+            "turn_angle_deg": turn_angle_deg,
+            "interior_angle_deg": interior_angle_deg,
+            "apex_points": selected_apex_points,
         }
 
     @staticmethod
@@ -1283,26 +1484,438 @@ class LaneDetector:
         return out
 
     @staticmethod
-    def _resample_pts(pts, n_out=20):
+    def _resample_pts(pts, n_out=20, flags=None):
         pts = np.asarray(pts, dtype=np.float32)
         if len(pts) < 2:
+            if flags is not None:
+                return pts, np.asarray(flags, dtype=bool)
             return pts
         diffs = np.diff(pts, axis=0)
         seg_lens = np.linalg.norm(diffs, axis=1)
         cum = np.r_[0.0, np.cumsum(seg_lens)]
         total = float(cum[-1])
         if total < 1e-3:
-            return np.repeat(pts[:1], n_out, axis=0)
+            out = np.repeat(pts[:1], n_out, axis=0)
+            if flags is not None:
+                f_arr = np.asarray(flags, dtype=bool)
+                return out, np.repeat(f_arr[:1], n_out)
+            return out
         targets = np.linspace(0.0, total, n_out)
         out = []
+        out_flags = []
+        f_arr = np.asarray(flags, dtype=bool) if flags is not None else None
         for s_val in targets:
             idx = min(len(pts) - 2, max(0, int(np.searchsorted(cum, s_val, side="right") - 1)))
             ds = max(1e-4, float(seg_lens[idx]))
             t = float(np.clip((s_val - cum[idx]) / ds, 0.0, 1.0))
             out.append(pts[idx] + t * diffs[idx])
-        return np.asarray(out, dtype=np.float32)
+            if f_arr is not None:
+                out_flags.append(bool(f_arr[idx] if t < 0.5 else f_arr[idx + 1]))
+        out_arr = np.asarray(out, dtype=np.float32)
+        if f_arr is not None:
+            return out_arr, np.asarray(out_flags, dtype=bool)
+        return out_arr
 
-    def detect_dual_lanes(self, mask, hT, wT, top_y_hint=105, img_gray=None):
+    @staticmethod
+    def _sample_seg_x_at_y(segments, y_val, y_tol=4.0, allow_bottom_ext=14.0):
+        """Lay toa do x cua bien tai dung cao do y_val (khong ngoai suy qua xa ngoai doan quan sat)."""
+        if not segments:
+            return None
+        best_x = None
+        best_score = 1e9
+        for idx, seg in enumerate(segments):
+            x1, y1 = seg["p1"]
+            x2, y2 = seg["p2"]
+            dy = y2 - y1
+            if abs(dy) < 3.0:
+                continue
+            ymin, ymax = min(y1, y2), max(y1, y2)
+            ext_lo = allow_bottom_ext if (idx == 0 and abs(dy) >= 16.0) else y_tol
+            if (ymin - y_tol) <= y_val <= (ymax + ext_lo):
+                t = (y_val - y1) / dy
+                if -0.20 <= t <= 1.25:
+                    x_val = float(x1 + t * (x2 - x1))
+                    dist_center = abs(y_val - 0.5 * (y1 + y2))
+                    if dist_center < best_score:
+                        best_score = dist_center
+                        best_x = x_val
+        return best_x
+
+    def _get_bev_matrix(self, points, wT, hT):
+        if points is None:
+            return None
+        pts = np.asarray(points, dtype=np.float32)
+        if pts.shape != (4, 2):
+            return None
+        key = (int(wT), int(hT), tuple(np.round(pts.ravel(), 1).tolist()))
+        if self._bev_cache_key != key:
+            dst = np.float32([[0.0, 0.0], [float(wT), 0.0], [0.0, float(hT)], [float(wT), float(hT)]])
+            self._bev_matrix = cv2.getPerspectiveTransform(pts, dst)
+            self._bev_cache_key = key
+        return self._bev_matrix
+
+    def _evaluate_distance_zones(self, left_segs, right_segs, hT, wT, car_ref_x, fresh_observation=True):
+        """
+        Do tam lan va be rong lan doc theo 5 gach ngang phan chia khoang cach (Z1 -> Z5).
+        Moi tang hoc va duy tri be rong lan rieng W_i; khi khuyet 1 ben bien tai tang y_i,
+        noi suy tam bang +/- 0.5 * W_i de duong tam luon bam giua long duong thay vi keo ngang.
+        """
+        n_zones = len(ZONE_SPECS)
+        if self.zone_widths is None or len(self.zone_widths) != n_zones:
+            self.zone_widths = [
+                float(np.clip(self.lane_width_ab[0] * (hT * r) + self.lane_width_ab[1], wT * 0.24, wT * 0.96))
+                for _, r in ZONE_SPECS
+            ]
+            self.zone_width_hits = [0] * n_zones
+
+        ys_zone = [float(int(round(hT * r))) for _, r in ZONE_SPECS]
+        raw_lr = []
+        both_ys, both_ws = [], []
+        for idx, y_q in enumerate(ys_zone):
+            xl = self._sample_seg_x_at_y(left_segs, y_q)
+            xr = self._sample_seg_x_at_y(right_segs, y_q)
+            if xl is not None and xr is not None:
+                w_meas = xr - xl
+                if wT * 0.20 <= w_meas <= wT * 0.98:
+                    both_ys.append(y_q)
+                    both_ws.append(w_meas)
+                    if fresh_observation or self.zone_width_hits[idx] == 0:
+                        alpha_w = 0.45 if self.zone_width_hits[idx] < 4 else 0.18
+                        self.zone_widths[idx] = float((1.0 - alpha_w) * self.zone_widths[idx] + alpha_w * w_meas)
+                        self.zone_width_hits[idx] += 1
+                else:
+                    # Neu 2 doan giao nhau vo ly, chi giu bien co tong do dai lon hon
+                    len_l = sum(float(s["length"]) for s in left_segs)
+                    len_r = sum(float(s["length"]) for s in right_segs)
+                    if len_l >= len_r:
+                        xr = None
+                    else:
+                        xl = None
+            raw_lr.append((xl, xr))
+
+        # Dong bo mo hinh phoi canh W(y) = a*y + b cho cac tang chua thay du 2 bien
+        a_lane, b_lane = self.lane_width_ab
+        if len(both_ys) >= 2 and np.ptp(both_ys) >= 20.0:
+            yv = np.asarray(both_ys, dtype=np.float32)
+            wv = np.asarray(both_ws, dtype=np.float32)
+            A = np.column_stack((yv, np.ones_like(yv)))
+            coef, _, _, _ = np.linalg.lstsq(A, wv, rcond=None)
+            a_fit = float(np.clip(coef[0], 0.35, 2.20))
+            b_fit = float(np.median(wv - a_fit * yv))
+            a_lane = 0.72 * a_lane + 0.28 * a_fit
+            b_lane = 0.72 * b_lane + 0.28 * b_fit
+            self.lane_width_ab = (a_lane, b_lane)
+        elif len(both_ys) == 1:
+            b_est = float(both_ws[0] - a_lane * both_ys[0])
+            b_lane = 0.70 * b_lane + 0.30 * b_est
+            self.lane_width_ab = (a_lane, b_lane)
+
+        for idx, y_q in enumerate(ys_zone):
+            if raw_lr[idx][0] is None or raw_lr[idx][1] is None:
+                w_prior = float(np.clip(a_lane * y_q + b_lane, wT * 0.22, wT * 0.96))
+                blend = 0.35 if self.zone_width_hits[idx] == 0 else 0.10
+                self.zone_widths[idx] = float((1.0 - blend) * self.zone_widths[idx] + blend * w_prior)
+
+        # Bao dam tinh don dieu theo phoi canh: tang gan luon rong >= tang xa
+        for idx in range(1, n_zones):
+            self.zone_widths[idx] = min(self.zone_widths[idx], self.zone_widths[idx - 1])
+
+        zones = []
+        for idx, (label, _) in enumerate(ZONE_SPECS):
+            y_q = ys_zone[idx]
+            xl, xr = raw_lr[idx]
+            w_ref = max(48.0, float(self.zone_widths[idx]))
+            if xl is not None and xr is not None:
+                xc = float(np.clip(0.5 * (xl + xr), 4.0, wT - 5.0))
+                w_used = float(xr - xl)
+                mode = "BOTH"
+                is_pred = False
+            elif xl is not None:
+                xc = float(np.clip(xl + 0.5 * w_ref, wT * 0.05, wT * 0.95))
+                w_used = w_ref
+                mode = "ONE_L"
+                is_pred = True
+            elif xr is not None:
+                xc = float(np.clip(xr - 0.5 * w_ref, wT * 0.05, wT * 0.95))
+                w_used = w_ref
+                mode = "ONE_R"
+                is_pred = True
+            else:
+                xc = None
+                w_used = w_ref
+                mode = "NONE"
+                is_pred = True
+
+            e_px = (xc - car_ref_x) if xc is not None else None
+            e_norm = float(np.clip(e_px / (0.5 * max(48.0, w_used)), -1.0, 1.0)) if e_px is not None else None
+            zones.append({
+                "label": label,
+                "y": float(y_q),
+                "x_left": float(xl) if xl is not None else None,
+                "x_right": float(xr) if xr is not None else None,
+                "x_center": xc,
+                "lane_width_px": w_used,
+                "offset_px": float(e_px) if e_px is not None else None,
+                "offset_norm": e_norm,
+                "mode": mode,
+                "predicted": is_pred,
+            })
+
+        return zones
+
+    def _build_centerline_from_zones(self, zones, left_segs, right_segs, hT, wT):
+        """Tao duong tam muot qua cac gach ngang Z1..Z5 va noi tiep nhanh re phia tren neu co khuc cua."""
+        valid = [z for z in zones if z["x_center"] is not None]
+        if len(valid) < 2:
+            return None, None
+
+        pts = [(float(z["x_center"]), float(z["y"])) for z in valid]
+        flags = [bool(z["predicted"]) for z in valid]
+
+        # Neo diem day sat mep duoi (hT - 6) theo do doc 2 tang thap nhat
+        bot_anchor_y = float(hT - 6.0)
+        if pts[0][1] < bot_anchor_y - 2.0:
+            x0, y0 = pts[0]
+            x1, y1 = pts[1]
+            dy = y0 - y1
+            slope = float(np.clip((x0 - x1) / dy, -1.6, 1.6)) if dy >= 4.0 else 0.0
+            x_bot = float(np.clip(x0 + slope * (bot_anchor_y - y0), wT * 0.08, wT * 0.92))
+            pts.insert(0, (x_bot, bot_anchor_y))
+            flags.insert(0, flags[0])
+
+        # Neu phia tren tang cao nhat co nhanh re ngang (elbow), noi tiep muot ve phia nhanh re
+        l_elbow = self._find_corner_elbow_seg_idx(left_segs)
+        r_elbow = self._find_corner_elbow_seg_idx(right_segs)
+        arm_segs = None
+        if l_elbow is not None and r_elbow is not None:
+            arm_segs = left_segs[l_elbow:] if sum(s["length"] for s in left_segs[l_elbow:]) >= sum(s["length"] for s in right_segs[r_elbow:]) else right_segs[r_elbow:]
+        elif l_elbow is not None:
+            arm_segs = left_segs[l_elbow:]
+        elif r_elbow is not None:
+            arm_segs = right_segs[r_elbow:]
+
+        if arm_segs:
+            arm_poly = self._sample_polyline(arm_segs, 8)
+            if len(arm_poly) >= 2:
+                disp_total = arm_poly[-1] - arm_poly[0]
+                if abs(float(disp_total[0])) >= 18.0:
+                    anchor_top = np.array(pts[-1], dtype=np.float32)
+                    for pt_a in arm_poly[1:]:
+                        disp = pt_a - arm_poly[0]
+                        cx_a = float(anchor_top[0] + 0.75 * disp[0])
+                        cy_a = float(np.clip(anchor_top[1] + 0.50 * disp[1], 6.0, anchor_top[1] - 1.0))
+                        if 4.0 <= cx_a <= wT - 5.0:
+                            pts.append((cx_a, cy_a))
+                            flags.append(True)
+                        else:
+                            break
+
+        return np.asarray(pts, dtype=np.float32), np.asarray(flags, dtype=bool)
+
+    def _compute_zone_control_signals(self, zones, points, corner, status, hT, wT, fresh_observation=True):
+        """
+        Tinh sai so lech tam da tang (e_lat), sai so goc huong tren mat phang BEV (heading_norm),
+        va tin hieu lai PD + lam muot toc do thay doi goc lai (rate limiter).
+        """
+        valid = [(idx, z) for idx, z in enumerate(zones) if z["x_center"] is not None]
+        if not valid:
+            return 0.0, 0.0, 0.0
+
+        c_dir = corner.get("direction") if corner.get("direction") in ("LEFT", "RIGHT") else corner.get("candidate", "UNKNOWN")
+        base_weights = ZONE_WEIGHTS_CORNER if c_dir in ("LEFT", "RIGHT") else ZONE_WEIGHTS_STRAIGHT
+        has_both = any(z["mode"] == "BOTH" for _, z in valid)
+
+        w_sum = 0.0
+        e_norm_acc = 0.0
+        near_w_sum = 0.0
+        near_px_acc = 0.0
+        for idx, z in valid:
+            wi = float(base_weights[idx])
+            if has_both:
+                wi *= 1.25 if z["mode"] == "BOTH" else 0.80
+            w_sum += wi
+            e_norm_acc += wi * float(z["offset_norm"])
+            # Do lech tam e_px tai xe do tu vung gan-can trung (Z1, Z2) de khong bi keo ao boi khuc cua xa
+            if idx <= 1:
+                nw = 0.65 if idx == 0 else 0.35
+                near_w_sum += nw
+                near_px_acc += nw * float(z["offset_px"])
+
+        e_lat_raw = float(e_norm_acc / max(1e-5, w_sum))
+        e_px_raw = float(near_px_acc / near_w_sum) if near_w_sum > 0 else float(valid[0][1]["offset_px"])
+
+        if self.smooth_e_px is None or not fresh_observation:
+            self.smooth_e_px = e_px_raw
+        else:
+            alpha_e = 0.52 if has_both else 0.38
+            delta_e = float(np.clip(e_px_raw - self.smooth_e_px, -18.0, 18.0))
+            self.smooth_e_px = float(self.smooth_e_px + alpha_e * delta_e)
+
+        ref_w = max(60.0, float(valid[0][1]["lane_width_px"]))
+        e_px_out = float(self.smooth_e_px)
+        e_lat_smooth = float(np.clip(0.55 * e_lat_raw + 0.45 * (e_px_out / (0.5 * ref_w)), -1.0, 1.0))
+
+        # Goc huong duong (Heading error) quy doi qua mat phang Bird's-Eye View
+        heading_raw = 0.0
+        if len(valid) >= 2:
+            pts_src = np.array([[z["x_center"], z["y"]] for _, z in valid], dtype=np.float32).reshape(-1, 1, 2)
+            M_bev = self._get_bev_matrix(points, wT, hT)
+            if M_bev is not None:
+                pts_bev = cv2.perspectiveTransform(pts_src, M_bev).reshape(-1, 2)
+                xs_b, ys_b = pts_bev[:, 0], pts_bev[:, 1]
+                if np.ptp(ys_b) >= 18.0:
+                    yb_mean = float(np.mean(ys_b))
+                    xb_mean = float(np.mean(xs_b))
+                    denom = float(np.sum((ys_b - yb_mean) ** 2))
+                    if denom > 1e-3:
+                        dx_dy_bev = float(np.sum((ys_b - yb_mean) * (xs_b - xb_mean)) / denom)
+                        heading_raw = float(np.clip(-dx_dy_bev * 0.85, -1.0, 1.0))
+            else:
+                heading_raw = float(np.clip(valid[-1][1]["offset_norm"] - valid[0][1]["offset_norm"], -1.0, 1.0))
+
+        if not fresh_observation:
+            self.smooth_heading_norm = heading_raw
+        else:
+            self.smooth_heading_norm = float(0.50 * heading_raw + 0.50 * self.smooth_heading_norm)
+
+        # Thanh phan vi phan D (giam chan dao dong khi xe chay nhanh)
+        now_t = time.perf_counter()
+        if fresh_observation and self._prev_e_lat is not None and self._prev_obs_t is not None:
+            dt = float(np.clip(now_t - self._prev_obs_t, 0.012, 0.15))
+            raw_de = (e_lat_smooth - self._prev_e_lat) / dt
+            self._d_err_filt = float(np.clip(0.45 * raw_de + 0.55 * self._d_err_filt, -2.5, 2.5))
+        else:
+            self._d_err_filt = 0.0
+        if fresh_observation:
+            self._prev_e_lat = e_lat_smooth
+            self._prev_obs_t = now_t
+
+        u_pd = float(np.clip(0.62 * e_lat_smooth + 0.48 * self.smooth_heading_norm + 0.075 * self._d_err_filt, -1.0, 1.0))
+
+        turn_now_flag = bool(corner.get("turn_now", False))
+        if turn_now_flag and c_dir in ("LEFT", "RIGHT"):
+            target_steer = max(u_pd, 0.88) if c_dir == "RIGHT" else min(u_pd, -0.88)
+        elif corner.get("distance_zone") == "APPROACH" and c_dir in ("LEFT", "RIGHT"):
+            # Cho phep bam tam muot trong [-0.40, +0.40] thay vi khoa cung +-0.12
+            target_steer = float(np.clip(u_pd, -0.40, 0.40))
+        elif status == "ONE_EDGE" and c_dir not in ("LEFT", "RIGHT"):
+            target_steer = float(np.clip(u_pd, -0.65, 0.65))
+        else:
+            target_steer = u_pd
+
+        if fresh_observation:
+            max_step = 0.42 if turn_now_flag else 0.24
+            steer_out = float(np.clip(self._prev_steer_out + np.clip(target_steer - self._prev_steer_out, -max_step, max_step), -1.0, 1.0))
+            self._prev_steer_out = steer_out
+        else:
+            steer_out = float(target_steer)
+
+        return e_px_out, float(e_lat_smooth), steer_out
+
+    @staticmethod
+    def _draw_distance_zones(img, zones, car_ref_x, wT):
+        """Ve cac vach gach ngang phan chia khoang cach (Z1..Z5) va thanh do lech tam tai tung tang."""
+        x_line_start = 28
+        x_line_end = wT - 6
+        ref_xi = int(round(car_ref_x))
+
+        for z in zones:
+            yi = int(round(z["y"]))
+            label = z["label"]
+            mode = z["mode"]
+
+            # Ve gach ngang net dut manh phan chia vung khoang cach
+            for x0 in range(x_line_start, x_line_end, 14):
+                x1 = min(x_line_end, x0 + 8)
+                cv2.line(img, (x0, yi), (x1, yi), (75, 90, 110), 1, cv2.LINE_AA)
+
+            cv2.putText(img, label, (4, yi + 3), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (175, 200, 225), 1, cv2.LINE_AA)
+
+            if z["x_center"] is None:
+                continue
+
+            col = (0, 240, 140) if mode == "BOTH" else (0, 205, 255)
+            xc_i = int(round(z["x_center"]))
+
+            if z["x_left"] is not None:
+                cv2.circle(img, (int(round(z["x_left"])), yi), 3, (255, 220, 80), cv2.FILLED, lineType=cv2.LINE_AA)
+            if z["x_right"] is not None:
+                cv2.circle(img, (int(round(z["x_right"])), yi), 3, (255, 220, 80), cv2.FILLED, lineType=cv2.LINE_AA)
+
+            cv2.line(img, (ref_xi, yi), (xc_i, yi), col, 2, cv2.LINE_AA)
+            cv2.circle(img, (xc_i, yi), 4, col, cv2.FILLED, lineType=cv2.LINE_AA)
+
+            e_px = z["offset_px"]
+            txt = f"{e_px:+.0f}"
+            tx = min(wT - 32, xc_i + 6) if e_px >= 0 else max(30, xc_i - 28)
+            cv2.putText(img, txt, (tx, yi - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.32, col, 1, cv2.LINE_AA)
+
+    @staticmethod
+    def _draw_corner_overlay(img, corner, wT, hT):
+        """Ve truc tiep dinh cua chuan (apex), tia tiep can/thoat cua va cung so do goc BEV len anh."""
+        if corner.get("candidate") not in ("LEFT", "RIGHT"):
+            return
+        apex_list = corner.get("apex_points") or []
+        elbow_y = corner.get("elbow_y")
+        if elbow_y is not None:
+            yi = int(round(np.clip(elbow_y, 6.0, hT - 6.0)))
+            for x0 in range(36, wT - 12, 12):
+                cv2.line(img, (x0, yi), (min(wT - 8, x0 + 6), yi), (0, 140, 255), 1, cv2.LINE_AA)
+
+        for ap in apex_list:
+            ax, ay = float(ap["apex"][0]), float(ap["apex"][1])
+            px, py = float(ap["prev"][0]), float(ap["prev"][1])
+            nx, ny = float(ap["next"][0]), float(ap["next"][1])
+            s_dir = ap.get("stem_dir")
+            v1 = (
+                np.array(s_dir, dtype=np.float32)
+                if s_dir is not None and np.linalg.norm(s_dir) >= 4.0
+                else np.array([ax - px, ay - py], dtype=np.float32)
+            )
+            v2 = np.array([nx - ax, ny - ay], dtype=np.float32)
+            l1, l2 = float(np.linalg.norm(v1)), float(np.linalg.norm(v2))
+            if l1 < 4.0 or l2 < 4.0:
+                continue
+            u1 = v1 / l1
+            u2 = v2 / l2
+
+            p_apex = (int(round(np.clip(ax, 2.0, wT - 3.0))), int(round(np.clip(ay, 2.0, hT - 3.0))))
+            # 1. Tia keo dai huong di thang (net dut vang-ngoc) de so sanh do be goc
+            for d0, d1 in ((4.0, 11.0), (15.0, 22.0), (26.0, 32.0)):
+                p_a = (int(round(np.clip(ax + u1[0] * d0, 1.0, wT - 2.0))), int(round(np.clip(ay + u1[1] * d0, 1.0, hT - 2.0))))
+                p_b = (int(round(np.clip(ax + u1[0] * d1, 1.0, wT - 2.0))), int(round(np.clip(ay + u1[1] * d1, 1.0, hT - 2.0))))
+                cv2.line(img, p_a, p_b, (0, 255, 255), 1, cv2.LINE_AA)
+
+            # 2. Mui ten cam doc theo nhanh thoat cua
+            arm_len = min(38.0, max(24.0, l2 * 0.65))
+            p_arm = (
+                int(round(np.clip(ax + u2[0] * arm_len, 2.0, wT - 3.0))),
+                int(round(np.clip(ay + u2[1] * arm_len, 2.0, hT - 3.0))),
+            )
+            cv2.arrowedLine(img, p_apex, p_arm, (0, 125, 255), 2, cv2.LINE_AA, tipLength=0.25)
+
+            # 3. Cung tron quet goc cua giua tia di thang va nhanh re ra
+            a1_deg = float(np.rad2deg(np.arctan2(u1[1], u1[0])))
+            a2_deg = float(np.rad2deg(np.arctan2(u2[1], u2[0])))
+            da_deg = (a2_deg - a1_deg + 180.0) % 360.0 - 180.0
+            cv2.ellipse(img, p_apex, (17, 17), 0.0, a1_deg, a1_deg + da_deg, (0, 225, 255), 2, cv2.LINE_AA)
+
+            # 4. Vong tron dinh cua + nhan do goc BEV
+            cv2.circle(img, p_apex, 6, (0, 140, 255), 2, lineType=cv2.LINE_AA)
+            cv2.circle(img, p_apex, 2, (255, 255, 255), cv2.FILLED, lineType=cv2.LINE_AA)
+
+            bev_deg = int(round(ap.get("total_bev_deg", ap.get("local_bev_deg", 0.0))))
+            txt = f"{bev_deg}deg"
+            (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)
+            tx = p_apex[0] + 12 if ap.get("side") == "LEFT" else p_apex[0] - tw - 14
+            ty = p_apex[1] + 20 if p_apex[1] < 54 else p_apex[1] - 10
+            tx = int(np.clip(tx, 6, wT - tw - 6))
+            ty = int(np.clip(ty, 56, hT - 42))
+            cv2.rectangle(img, (tx - 3, ty - th - 2), (tx + tw + 3, ty + 3), (20, 20, 24), cv2.FILLED)
+            cv2.rectangle(img, (tx - 3, ty - th - 2), (tx + tw + 3, ty + 3), (0, 170, 255), 1, cv2.LINE_AA)
+            cv2.putText(img, txt, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 240, 255), 1, cv2.LINE_AA)
+
+    def detect_dual_lanes(self, mask, hT, wT, top_y_hint=105, img_gray=None, fresh_observation=True):
         l_res, r_res = self._find_and_trace_boundaries(mask, top_y_hint=top_y_hint, gray=img_gray)
         l_segs = self._fit_piecewise_segments(l_res[0], l_res[1]) if l_res is not None else []
         r_segs = self._fit_piecewise_segments(r_res[0], r_res[1]) if r_res is not None else []
@@ -1372,15 +1985,22 @@ class LaneDetector:
             })
         self._associate_boundaries(cands, hT, wT)
 
-        c_pts, p_flags, new_ab = self._compute_lane_and_centerline(
-            self.left_segments, self.right_segments, hT, wT, lane_width_ab=self.lane_width_ab
+        car_ref_x = wT * 0.5
+        zones = self._evaluate_distance_zones(
+            self.left_segments, self.right_segments, hT, wT, car_ref_x, fresh_observation=fresh_observation
         )
-        self.lane_width_ab = new_ab
+        self.last_zones = zones
+
+        c_pts, p_flags = self._build_centerline_from_zones(zones, self.left_segments, self.right_segments, hT, wT)
+        if c_pts is None:
+            c_pts, p_flags, new_ab = self._compute_lane_and_centerline(
+                self.left_segments, self.right_segments, hT, wT, lane_width_ab=self.lane_width_ab
+            )
+            self.lane_width_ab = new_ab
 
         # Lam muot duong tam qua cac frame lien tiep de vach khong nhay lung tung
         if len(c_pts) >= 2:
-            c_resamp = self._resample_pts(c_pts, n_out=20)
-            p_resamp = np.full(len(c_resamp), bool(np.any(p_flags)), dtype=bool)
+            c_resamp, p_resamp = self._resample_pts(c_pts, n_out=20, flags=p_flags)
             if self._smooth_center_pts is not None and len(self._smooth_center_pts) == len(c_resamp) and self.missing_frames == 0:
                 mean_diff = float(np.mean(np.linalg.norm(c_resamp - self._smooth_center_pts, axis=1)))
                 if mean_diff < 52.0:
@@ -1608,10 +2228,11 @@ class LaneDetector:
         raw_curve = hist_curve
         img_hist_combined = cv2.addWeighted(img_hist1, 0.5, img_hist2, 0.5, 0)
 
-        corner = {"direction": "UNKNOWN", "candidate": "UNKNOWN", "intent_direction": self._intent_turn_dir,
+        corner = {"direction": "UNKNOWN", "state": "NONE", "candidate": "UNKNOWN", "intent_direction": self._intent_turn_dir,
                   "confirmed": False, "confidence": 0.0, "evidence": {"LEFT": [], "RIGHT": []},
                   "elbow_y": None, "elbow_x": None, "elbow_y_ratio": 0.0,
-                  "stem_span_y": float(hT), "distance_zone": "NONE", "turn_now": False}
+                  "stem_span_y": float(hT), "distance_zone": "NONE", "turn_now": False,
+                  "angle_deg": 0.0, "turn_angle_deg": 0.0, "interior_angle_deg": 180.0, "apex_points": []}
         c_x = None
         plot_y = None
         status = "HISTOGRAM_UNVERIFIED"
@@ -1629,8 +2250,10 @@ class LaneDetector:
             top_hint = int(points[0][1]) if points is not None else int(hT * 0.60)
             if profile == "robot":
                 img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
-                plot_y, l_x, r_x, c_x, status = self.detect_dual_lanes(img_thres, hT, wT, top_y_hint=top_hint, img_gray=img_gray)
-                corner = self.inspect_corner(img_thres, fresh_observation=fresh_observation)
+                plot_y, l_x, r_x, c_x, status = self.detect_dual_lanes(
+                    img_thres, hT, wT, top_y_hint=top_hint, img_gray=img_gray, fresh_observation=fresh_observation
+                )
+                corner = self.inspect_corner(img_thres, points=points, fresh_observation=fresh_observation)
                 all_segs = self.left_segments + self.right_segments
                 if all_segs:
                     tape_w_ref = float(np.median([s["width"] for s in all_segs]))
@@ -1638,6 +2261,12 @@ class LaneDetector:
                 # 1. Ve 2 vach mau xanh bien bam chinh xac vao giua 2 vach trang thuc te voi do day theo tung vi tri
                 self._draw_blue_tapered_segments(img_result, self.left_segments)
                 self._draw_blue_tapered_segments(img_result, self.right_segments)
+
+                # 1b. Ve cac gach ngang phan chia khoang cach Z1..Z5 va truc tham chieu tam xe
+                if self.last_zones:
+                    cv2.line(img_result, (int(round(car_ref_x)), int(round(hT * 0.30))),
+                             (int(round(car_ref_x)), hT - 6), (80, 95, 115), 1, cv2.LINE_AA)
+                    self._draw_distance_zones(img_result, self.last_zones, car_ref_x, wT)
 
                 # 2. Ve duong tam mau trang (net lien khi 2 vach quan sat, net dut danh dau khi du doan tu 1 vach)
                 c_pts = self.center_pts
@@ -1664,88 +2293,68 @@ class LaneDetector:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 230, 255), 1, cv2.LINE_AA
                         )
 
-                    # 3. Xac dinh diem thap nhat cua duong tam trang & tinh do lech tam e so voi vi tri tham chieu xe
+                    # 3. Tinh do lech tam da tang, goc huong BEV va tin hieu lai PD on dinh
                     low_idx = int(np.argmax(c_pts[:, 1]))
                     cx_low_raw = float(c_pts[low_idx, 0])
-                    cy_low = float(c_pts[low_idx, 1])
-                    w_lane_ref = max(60.0, float(self.lane_width_ab[0] * cy_low + self.lane_width_ab[1]))
-                    e_px_raw = cx_low_raw - car_ref_x
-
-                    if self.smooth_e_px is None or not fresh_observation:
-                        self.smooth_e_px = e_px_raw
+                    valid_zones = [z for z in self.last_zones if z["x_center"] is not None]
+                    if valid_zones:
+                        w_lane_ref = max(60.0, float(valid_zones[0]["lane_width_px"]))
+                        e_px_out, e_norm_out, steer_norm_out = self._compute_zone_control_signals(
+                            self.last_zones, points, corner, status, hT, wT, fresh_observation=fresh_observation
+                        )
                     else:
-                        alpha_e = 0.48 if (len(self.left_segments) > 0 and len(self.right_segments) > 0) else 0.35
-                        delta_e = float(np.clip(e_px_raw - self.smooth_e_px, -18.0, 18.0))
-                        self.smooth_e_px = float(self.smooth_e_px + alpha_e * delta_e)
+                        cy_low = float(c_pts[low_idx, 1])
+                        w_lane_ref = max(60.0, float(self.lane_width_ab[0] * cy_low + self.lane_width_ab[1]))
+                        e_px_raw = cx_low_raw - car_ref_x
+                        if self.smooth_e_px is None or not fresh_observation:
+                            self.smooth_e_px = e_px_raw
+                        else:
+                            delta_e = float(np.clip(e_px_raw - self.smooth_e_px, -18.0, 18.0))
+                            self.smooth_e_px = float(self.smooth_e_px + 0.40 * delta_e)
+                        e_px_out = float(self.smooth_e_px)
+                        e_norm_out = float(np.clip(e_px_out / (0.5 * w_lane_ref), -1.0, 1.0))
+                        steer_norm_out = e_norm_out
 
-                    e_px_out = float(self.smooth_e_px)
-                    e_norm_out = float(np.clip(e_px_out / (0.5 * w_lane_ref), -1.0, 1.0))
                     self.smooth_e_norm = e_norm_out
                     offset_dir = "CAN GIUA" if abs(e_px_out) <= 4.0 else ("LECH PHAI" if e_px_out > 0 else "LECH TRAI")
 
-                    # 4. Tinh diem ngam lai Lookahead tren duong tam:
-                    # Neu phat hien goc cua o xa (turn_now == False), GIU DIEM NGAM O DOAN THANG TRUOC GOC CUA
-                    # de xe khong bao gio re som khi chua toi khuc cua!
+                    # 4. Xac dinh diem ngam Lookahead truc quan tren duong tam da tang
                     elbow_y_val = corner.get("elbow_y")
                     turn_now_flag = bool(corner.get("turn_now", False))
                     c_turn_dir = corner.get("direction") if corner.get("direction") in ("LEFT", "RIGHT") else corner.get("candidate", "UNKNOWN")
 
-                    if not turn_now_flag and elbow_y_val is not None:
-                        # Chi lay cac diem nam tren doan thang truoc khuc cua (y > elbow_y + 10)
-                        valid_mask = c_pts[:, 1] >= (float(elbow_y_val) + 10.0)
-                        stem_c_pts = c_pts[valid_mask] if np.any(valid_mask) else c_pts
-                        y_look_target = max(float(hT * 0.68), float(elbow_y_val) + 22.0)
-                        look_idx = int(np.argmin(np.abs(stem_c_pts[:, 1] - y_look_target)))
-                    elif turn_now_flag:
-                        # Khi da toi diem re (TURN_NOW), ngam vao nhanh re cua duong tam de be lai ngay!
-                        stem_c_pts = c_pts
-                        look_idx = min(len(stem_c_pts) - 1, max(0, int(round((len(stem_c_pts) - 1) * 0.78))))
+                    if turn_now_flag:
+                        look_idx = min(len(c_pts) - 1, max(0, int(round((len(c_pts) - 1) * 0.78))))
+                        cx_look, cy_look = float(c_pts[look_idx, 0]), float(c_pts[look_idx, 1])
                     else:
-                        stem_c_pts = c_pts
-                        y_look_target = float(hT * 0.68)
-                        look_idx = int(np.argmin(np.abs(stem_c_pts[:, 1] - y_look_target)))
-
-                    cx_look = float(stem_c_pts[look_idx, 0])
-                    cy_look = float(stem_c_pts[look_idx, 1])
+                        y_look_target = float(hT * (0.62 if c_turn_dir in ("LEFT", "RIGHT") else 0.68))
+                        look_idx = int(np.argmin(np.abs(c_pts[:, 1] - y_look_target)))
+                        cx_look, cy_look = float(c_pts[look_idx, 0]), float(c_pts[look_idx, 1])
                     lookahead_c_pt = (cx_look, cy_look)
-                    w_lane_look = max(60.0, float(self.lane_width_ab[0] * cy_look + self.lane_width_ab[1]))
-                    e_look_norm = float(np.clip((cx_look - car_ref_x) / (0.5 * w_lane_look), -1.0, 1.0))
-
-                    if turn_now_flag and c_turn_dir in ("LEFT", "RIGHT"):
-                        turn_sign = +1.0 if c_turn_dir == "RIGHT" else -1.0
-                        steer_norm_out = float(np.clip(0.15 * e_norm_out + 0.85 * e_look_norm, -1.0, 1.0))
-                        if turn_sign > 0:
-                            steer_norm_out = max(steer_norm_out, +0.95)
-                        else:
-                            steer_norm_out = min(steer_norm_out, -0.95)
-                    else:
-                        if status == "ONE_EDGE" and c_turn_dir not in ("LEFT", "RIGHT"):
-                            # Khi xe di lech sang 1 ben tren doan thang (chi con 1 vach):
-                            # Dieu huong banh re ve giua duong dua vao do lech tuong doi cua diem bat dau
-                            steer_norm_out = float(np.clip(0.60 * e_norm_out + 0.40 * e_look_norm, -0.55, 0.55))
-                        else:
-                            steer_norm_out = float(np.clip(0.35 * e_norm_out + 0.65 * e_look_norm, -1.0, 1.0))
-                            if corner.get("distance_zone") == "APPROACH" and c_turn_dir in ("LEFT", "RIGHT"):
-                                # DANG DI THANG QUA 15CM DIEM MU: Giu thang lai tren than duong, khong be lai som!
-                                steer_norm_out = float(np.clip(steer_norm_out, -0.12, 0.12))
 
                     # Ve diem ngam Lookahead (vong tron xanh ngoc) tren duong tam trang
                     pt_look = (int(round(np.clip(cx_look, 2.0, wT - 3.0))), int(round(np.clip(cy_look, 2.0, hT - 3.0))))
                     cv2.circle(img_result, pt_look, 5, (255, 255, 0), 2, lineType=cv2.LINE_AA)
 
+                    # 1c. Ve dinh goc cua chuan, tia tiep can/thoat cua va cung so do goc BEV truc tiep len anh
+                    self._draw_corner_overlay(img_result, corner, wT, hT)
+
                     # Hien thi trang thai khoang cach goc cua tren HUD
                     if corner.get("candidate") in ("LEFT", "RIGHT") and elbow_y_val is not None:
                         c_dir_vn = "PHAI" if corner["candidate"] == "RIGHT" else "TRAI"
+                        turn_deg_i = int(round(corner.get("turn_angle_deg", 0.0)))
+                        ang_tag = f" ~{turn_deg_i}deg" if turn_deg_i > 0 else ""
                         if turn_now_flag:
-                            c_txt = f"CUA {c_dir_vn} (y={int(elbow_y_val)}) -> RE NGAY!"
+                            c_txt = f"CUA {c_dir_vn}{ang_tag} (BEV y={int(elbow_y_val)}) -> RE NGAY!"
                             c_col = (0, 165, 255)
                         elif corner.get("distance_zone") == "APPROACH":
-                            c_txt = f"CUA {c_dir_vn} (y={int(elbow_y_val)}) -> DI THANG BU DIEM MU 15CM"
+                            c_txt = f"CUA {c_dir_vn}{ang_tag} (BEV y={int(elbow_y_val)}) -> BU DIEM MU 15CM"
                             c_col = (0, 230, 255)
                         else:
-                            c_txt = f"CUA {c_dir_vn} PHIA TRUOC (y={int(elbow_y_val)}) -> DI THANG"
+                            c_txt = f"CUA {c_dir_vn}{ang_tag} PHIA TRUOC (BEV y={int(elbow_y_val)}) -> DI THANG"
                             c_col = (255, 230, 0)
-                        cv2.putText(img_result, c_txt, (8, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.40, c_col, 1, cv2.LINE_AA)
+                        cv2.putText(img_result, c_txt, (8, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.39, (12, 16, 20), 3, cv2.LINE_AA)
+                        cv2.putText(img_result, c_txt, (8, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.39, c_col, 1, cv2.LINE_AA)
 
                     # 5. MUI TEN DO CO DINH O MEP DUOI (y = hT - 6), DI CHUYEN NGANG CUNG TAM LAN (x = cx_low_disp)
                     #    DE TINH DO LECH TAM e SO VOI VACH THAM CHIEU VANG O GIUA XE (car_ref_x = wT / 2)
@@ -1842,6 +2451,7 @@ class LaneDetector:
             "center_available": c_x is not None,
             "center_offset_px": e_px_out,
             "center_offset_norm": e_norm_out,
+            "heading_norm": self.smooth_heading_norm if profile == "robot" else 0.0,
             "steer_offset_norm": steer_norm_out,
             "offset_direction": offset_dir,
             "vehicle_ref_x": car_ref_x,
@@ -1853,6 +2463,7 @@ class LaneDetector:
             "tape_width_px": tape_w_ref,
             "left_segments": self.left_segments if profile == "robot" else [],
             "right_segments": self.right_segments if profile == "robot" else [],
+            "distance_zones": self.last_zones if profile == "robot" else [],
             "centerline_predicted": bool(np.any(self.center_pred_flags)) if (profile == "robot" and len(self.center_pred_flags) > 0) else (edge_count == 1),
             "boundaries": self.observed_boundaries if profile == "robot" and use_dual_edge else [],
             "centerline": (self.center_pts.tolist() if (profile == "robot" and len(self.center_pts) > 0) else (np.column_stack((c_x, plot_y)).tolist() if c_x is not None else None)),
@@ -1903,23 +2514,26 @@ class LaneDetector:
         light_mode = lighting_info["mode"]
         roi_scope = "ROI-ONLY" if (restrict_roi or profile == "highway") else "WIDE-CORNER"
         if profile == "robot":
+            n_zones_ok = sum(1 for z in self.last_zones if z["x_center"] is not None)
             cv2.putText(
                 img_result,
-                f"e = {e_px_out:+.1f}px ({e_norm_out:+.2f}) [{offset_dir}]",
-                (8, hT - 26), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (0, 255, 255), 2, cv2.LINE_AA
+                f"e={e_px_out:+.1f}px ({e_norm_out:+.2f}) H:{self.smooth_heading_norm:+.2f} [{offset_dir}]",
+                (8, hT - 26), cv2.FONT_HERSHEY_SIMPLEX, 0.39, (0, 255, 255), 1, cv2.LINE_AA
             )
             label = (
                 f"Lane:{self.last_detection['lane_state']} | "
-                f"Segs L:{len(self.left_segments)} R:{len(self.right_segments)} | "
+                f"Zones:{n_zones_ok}/{len(ZONE_SPECS)} | "
                 f"W_lane:{int(w_lane_ref)}px W_tape:{tape_w_ref:.1f}px"
             )
             cv2.putText(img_result, label, (8, hT - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (200, 255, 200), 1, cv2.LINE_AA)
         else:
             label = f"Lane:{self.last_detection['lane_state']} | Light:{light_mode} | {roi_scope}"
             cv2.putText(img_result, label, (6, hT - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.39, (0, 255, 255), 1)
+        turn_hud = int(round(corner.get("turn_angle_deg", 0.0)))
+        turn_hud_s = f" {turn_hud}deg" if turn_hud > 0 else ""
         cv2.putText(img_hist_combined,
-                    f"Corner:{corner['candidate']} conf:{corner['confidence']:.2f} | Light:{light_mode}",
-                    (6, 62), cv2.FONT_HERSHEY_SIMPLEX, .39, (0, 255, 255), 1)
+                    f"Corner:{corner['candidate']}{turn_hud_s} conf:{corner['confidence']:.2f} | Light:{light_mode}",
+                    (6, 62), cv2.FONT_HERSHEY_SIMPLEX, .37, (0, 255, 255), 1)
         return norm_curve, img_roi, img_thres, img_warp_vis, img_hist_combined, img_result
 
 

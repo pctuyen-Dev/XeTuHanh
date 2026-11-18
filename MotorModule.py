@@ -244,8 +244,8 @@ def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=Non
     """
     global _last_known_turn_dir, _last_corner_dir_time, _on_lane_since
 
-    # Khuếch đại độ nhạy góc lái (STEER_GAIN = 1.35) để cua mạnh và dứt khoát hơn
-    STEER_GAIN = 1.35
+    # Do nhay lai da duoc can chinh theo PD + goc huong BEV tu LaneDetector
+    STEER_GAIN = 1.12
     c = float(np.clip(curve_val * STEER_GAIN, -1.0, 1.0))
     if abs(c) < 0.03:
         c = 0.0
@@ -321,11 +321,11 @@ def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=Non
         elif turn_now and intent_dir in ("LEFT", "RIGHT") and lane_state == "ONE_EDGE":
             c = -1.0 if intent_dir == "LEFT" else +1.0
         elif dist_zone == "APPROACH" and corner_cand in ("LEFT", "RIGHT"):
-            # Khi cam nhan dien dc goc cua, can cho xe DI THANG THEM 1 DOAN de bu diem mu 15cm, KHONG DUOC CUA SOM!
-            c = float(np.clip(c, -0.12, 0.12))
+            # Cho phep bam tam muot trong khi tien sat khuc cua, tranh khoa cung lam xe giat
+            c = float(np.clip(c, -0.40, 0.40))
         elif lane_state == "ONE_EDGE" and not turn_now:
-            # Khi xe di lech 1 ben tren duong thang (chi thay 1 vach): dieu chinh manh ve giua lan
-            c = float(np.clip(c * 1.4, -0.55, 0.55))
+            # Khi xe di lech 1 ben tren duong thang (chi thay 1 vach): dieu chinh em ve giua lan
+            c = float(np.clip(c * 1.15, -0.65, 0.65))
 
         if abs(c) >= 0.55:
             cmd = "SHARP_R" if c > 0 else "SHARP_L"
@@ -341,7 +341,7 @@ def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=Non
             throttle_pwm = SPEED_ONE_EDGE
         elif abs(c) >= 0.10:
             cmd = "CURVE"
-            throttle_pwm = int(round(np.clip((0.80 - 0.25 * abs(c)) * 100, SPEED_CURVE_MIN, SPEED_CURVE_MAX)))
+            throttle_pwm = int(round(np.clip((0.82 - 0.28 * abs(c)) * 100, SPEED_CURVE_MIN, SPEED_CURVE_MAX)))
         else:
             cmd = "NORM"
             throttle_pwm = SPEED_STRAIGHT

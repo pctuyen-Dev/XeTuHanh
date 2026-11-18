@@ -195,14 +195,14 @@ def compute_sign_color_masks(image, use_clahe=True, precomputed_lighting=None):
 
         lower_b, upper_b = np.array([94, s_blue_min, v_min]), np.array([140, 255, 255])
         mask_b = cv2.inRange(hsv, lower_b, upper_b)
-        chroma_b_ok = (blue_chroma >= 9).astype(np.uint8) * 255
+        chroma_b_ok = (blue_chroma >= 14).astype(np.uint8) * 255
         mask_b = cv2.bitwise_and(mask_b, chroma_b_ok)
 
         if use_clahe:
             hsv_orig = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
             b0, g0, r0 = [c.astype(np.int16) for c in cv2.split(image)]
             rc0 = ((r0 - np.maximum(g0, b0)) >= 15).astype(np.uint8) * 255
-            bc0 = ((b0 - np.maximum(r0, g0)) >= 9).astype(np.uint8) * 255
+            bc0 = ((b0 - np.maximum(r0, g0)) >= 14).astype(np.uint8) * 255
             mask_r_orig = cv2.bitwise_and(
                 cv2.bitwise_or(cv2.inRange(hsv_orig, lower_r1, upper_r1),
                                cv2.inRange(hsv_orig, lower_r2, upper_r2)),

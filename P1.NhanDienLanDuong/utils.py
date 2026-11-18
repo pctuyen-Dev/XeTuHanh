@@ -134,8 +134,23 @@ def thin_mask(mask):
     return out
 
 
+def compute_glare_contrast(img_or_gray):
+    """Perspective-scaled 2D Top-Hat contrast that suppresses glossy glare pools without bright-border bleed."""
+    gray = cv2.cvtColor(img_or_gray, cv2.COLOR_BGR2GRAY) if img_or_gray.ndim == 3 else img_or_gray
+    h, w = gray.shape[:2]
+    d_top = max(9, int(round(min(w, h) * 0.080)) | 1)
+    d_bot = max(15, int(round(min(w, h) * 0.130)) | 1)
+    bg_top = cv2.morphologyEx(gray, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d_top, d_top)))
+    bg_bot = cv2.morphologyEx(gray, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (d_bot, d_bot)))
+    y_norm = np.linspace(0.0, 1.0, h, dtype=np.float32)[:, None]
+    alpha = np.clip((y_norm - 0.30) / 0.40, 0.0, 1.0)
+    background = ((1.0 - alpha) * bg_top + alpha * bg_bot).astype(np.uint8)
+    contrast = cv2.subtract(gray, background)
+    return contrast, background, y_norm
+
+
 def thresholding(img, hsv_range=None, roi_points=None, restrict_roi=False):
-    """Tape candidates with automatic Day/Night adaptation, glare suppression, and outer-blob detachment."""
+    """Tape candidates with automatic Day/Night adaptation, specular glare suppression, and thick-blob removal."""
     h, w = img.shape[:2]
     light_info = analyze_lighting(img, roi_points=roi_points)
     mode = light_info["mode"]
@@ -150,67 +165,94 @@ def thresholding(img, hsv_range=None, roi_points=None, restrict_roi=False):
 
     hsv = cv2.cvtColor(proc_img, cv2.COLOR_BGR2HSV)
     light = cv2.cvtColor(proc_img, cv2.COLOR_BGR2GRAY)
+    contrast, background, y_norm = compute_glare_contrast(light)
+
+    # Local edge sharpness (Sobel gradient max within half-tape window) rejects smooth specular glare domes
+    gx = cv2.Sobel(light, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(light, cv2.CV_32F, 0, 1, ksize=3)
+    gmag = cv2.magnitude(gx, gy) * 0.25
+    k_edge = max(13, int(round(min(w, h) * 0.088)) | 1)
+    local_edge_max = cv2.dilate(gmag, np.ones((k_edge, k_edge), np.uint8))
 
     road_top = int(h * 0.38)
     road_bot = int(h * 0.96)
     road_gray = light[road_top:road_bot, :] if road_bot > road_top else light
-    med_g = float(np.median(road_gray))
-    p88_g = float(np.percentile(road_gray, 88))
+    road_bg = background[road_top:road_bot, :] if road_bot > road_top else background
+    # Use lower-to-mid background percentile so widespread glossy glare does not inflate mat baseline
+    mat_dark_g = float(np.percentile(road_bg, 35))
     p98_g = float(np.percentile(road_gray, 99.5))
 
-    diameter = max(9, int(round(min(w, h) * 0.13)) | 1)
-    background = cv2.morphologyEx(
-        light, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (diameter, diameter))
-    )
-    contrast = cv2.subtract(light, background)
-
-    contrast_thresh = max(18, int(round(max(22.0, (p98_g - med_g) * 0.32))))
-    if mode == "DARK" and p98_v < 170.0:
+    is_dark_scene = (mode == "DARK" and p98_v < 170.0)
+    contrast_thresh = max(20, min(46, int(round(max(22.0, (p98_g - mat_dark_g) * 0.26)))))
+    if is_dark_scene:
         contrast_thresh = max(11, int(round(18.0 * (max(p98_v, 60.0) / 175.0))))
-
-    adaptive_v_min = max(165, int(round(max(p88_g + 15.0, 0.42 * med_g + 0.54 * p98_g))))
-
-    if hsv_range is None:
-        s_max = 105 if (mode == "DARK" and p98_v < 170.0) else (65 if med_g > 115 else 85)
-        v_min = adaptive_v_min
-        color = (hsv[:, :, 1] <= s_max) & (hsv[:, :, 2] >= v_min)
+        v_min = max(105, int(med_v * 1.35 + 15))
+        s_max = 105
+        edge_min = 12.0
+    elif p98_g >= 218.0:
+        # Reject dim glossy sheen/crease reflections when real white tape hits near-white
+        v_glare_floor = int(round(np.clip(0.81 * p98_g, 188.0, 208.0)))
+        v_min = max(165, v_glare_floor)
+        if hsv_range is not None:
+            v_min = max(v_min, int(hsv_range[0][2]))
+            s_max = min(int(hsv_range[1][1]), 58)
+        else:
+            s_max = 58
+        edge_min = 24.0
     else:
-        lower, upper = np.asarray(hsv_range[0]).copy(), np.asarray(hsv_range[1]).copy()
-        if mode == "DARK" and p98_v < 170.0 and lower[2] >= 165:
-            lower[2] = max(105, int(med_v * 1.35 + 15))
-            upper[1] = max(int(upper[1]), 105)
-        elif p98_g >= 230.0 and med_g >= 110.0 and lower[2] <= 185:
-            lower[2] = max(int(lower[2]), adaptive_v_min)
-            upper[1] = min(int(upper[1]), 68)
-        elif p98_g < 175.0 and lower[2] >= 160:
-            lower[2] = min(int(lower[2]), adaptive_v_min)
-        color = cv2.inRange(hsv, lower, upper) > 0
+        v_min = 165 if hsv_range is None else int(hsv_range[0][2])
+        s_max = 85 if hsv_range is None else int(hsv_range[1][1])
+        edge_min = 18.0
 
-    y_v_min = 60 if (mode == "DARK" and p98_v < 170.0) else 90
+    # Neutrality check + tight colored-surface guard reject tinted specular highlights (e.g. glossy red hood)
+    # without erasing clean high-contrast white tape near the orange chassis at the bottom border.
+    v_minus_l = hsv[:, :, 2].astype(np.int16) - light.astype(np.int16)
+    neutral_ok = v_minus_l <= (24 if is_dark_scene else 18)
+    b_ch, g_ch, r_ch = [c.astype(np.float32) for c in cv2.split(proc_img)]
+    chroma_dom = np.maximum(
+        np.maximum(0.0, r_ch - np.maximum(g_ch, b_ch)),
+        np.maximum(0.0, b_ch - np.maximum(r_ch, g_ch)),
+    )
+    chroma_local = cv2.boxFilter(chroma_dom, -1, (9, 9))
+    hi_contrast_white = (contrast >= 70) & (hsv[:, :, 1] <= 85) & (v_minus_l <= 24)
+    # Also recover shaded white tape lying over dark road (e.g. near camera edge/hood) when contrast is very sharp
+    shaded_dark_mat_tape = (
+        (background <= 95) & (contrast >= 80) & (hsv[:, :, 2] >= 158) & (hsv[:, :, 1] <= 65) & (v_minus_l <= 20)
+    )
+    not_colored_surface_glare = (chroma_local < 28.0) | ((chroma_dom < 26.0) & hi_contrast_white)
+
+    color = (
+        (
+            ((((hsv[:, :, 1] <= s_max) & neutral_ok) | hi_contrast_white) & (hsv[:, :, 2] >= v_min))
+            | shaded_dark_mat_tape
+        )
+        & not_colored_surface_glare
+    )
+
+    y_v_min = 60 if is_dark_scene else 90
     yellow = cv2.inRange(hsv, np.array([14, 48, y_v_min]), np.array([38, 255, 255])) > 0
-    mask = np.uint8((color | yellow) & (contrast >= contrast_thresh)) * 255
 
-    # Detach wide outer objects (e.g. traffic sign base touching the outer edge of the tape)
-    for y in range(h - 3, 10, -1):
-        row = np.flatnonzero(mask[y])
-        if row.size == 0:
-            continue
-        ratio = float(np.clip(y / float(h), 0.0, 1.0))
-        max_tape_w = int(round(16 + 24 * ratio))
-        for g in np.split(row, np.flatnonzero(np.diff(row) > 1) + 1):
-            gw = int(g[-1] - g[0] + 1)
-            if gw > max_tape_w:
-                s, e = int(g[0]), int(g[-1]) + 1
-                below = np.flatnonzero(mask[min(h - 1, y + 2)])
-                if below.size > 0:
-                    for gb in np.split(below, np.flatnonzero(np.diff(below) > 1) + 1):
-                        sb, eb = int(gb[0]), int(gb[-1]) + 1
-                        wb = eb - sb
-                        if 3 <= wb <= max_tape_w:
-                            if abs(s - sb) <= 6 and s > w // 3:
-                                mask[y, s + wb + 2 : e] = 0
-                            elif abs(e - eb) <= 6 and e < (2 * w) // 3:
-                                mask[y, s : max(0, e - wb - 2)] = 0
+    # Allow compressed contrast where real bright white tape passes directly through an elevated glare patch
+    contrast_ok = (contrast >= contrast_thresh) | (
+        (background >= 135)
+        & (hsv[:, :, 2] >= 232)
+        & (hsv[:, :, 1] <= 40)
+        & neutral_ok
+        & (contrast >= max(16, int(round(contrast_thresh * 0.45))))
+    )
+    mask = np.uint8((color | yellow) & contrast_ok & (local_edge_max >= edge_min)) * 255
+
+    # Erase thick 2D glare pools, bright floor, and hood glare cores while detaching narrow lane tapes.
+    # Replicate border first so wide bright floor regions touching image edges get their true thickness.
+    pad = 28
+    mask_pad = cv2.copyMakeBorder(mask, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
+    dist_pad = cv2.distanceTransform(mask_pad, cv2.DIST_L2, 3)
+    max_half_w = 9.0 + 8.5 * y_norm
+    max_half_w_pad = np.pad(max_half_w, ((pad, pad), (0, 0)), mode="edge")
+    fat_core_pad = (dist_pad > max_half_w_pad).astype(np.uint8) * 255
+    if np.any(fat_core_pad):
+        dist_to_core = cv2.distanceTransform(255 - fat_core_pad, cv2.DIST_L2, 3)[pad : pad + h, pad : pad + w]
+        mask[dist_to_core <= (max_half_w + 2.5)] = 0
 
     # Bridge tiny 2-4px breaks along the tape (such as a thin wire crossing the white line)
     kernel_bridge = np.ones((4, 2), dtype=np.uint8)
@@ -225,14 +267,23 @@ def thresholding(img, hsv_range=None, roi_points=None, restrict_roi=False):
 
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     clean = np.zeros_like(mask)
-    min_area_std = max(12, int(w * h * 0.00008))
-    min_span_std = max(8, int(w * 0.025))
+    min_area_std = max(14, int(w * h * 0.00012))
+    min_span_std = max(10, int(w * 0.025))
+    min_frag_v = min(226.0, max(v_min + 12.0, p98_g * 0.88))
     for i in range(1, count):
         x, y, cw, ch, area = stats[i]
         # Giu lai cac net dut ngan o xa (nua tren khung hinh) co be rong hop ly
-        is_dash_upper = (y < int(h * 0.62)) and (area >= 10) and (max(cw, ch) >= 5) and (2 <= cw <= 24)
-        if (area >= min_area_std and max(cw, ch) >= min_span_std) or is_dash_upper:
-            clean[labels == i] = 255
+        is_dash_upper = (y < int(h * 0.62)) and (area >= 14) and (max(cw, ch) >= 7) and (2 <= min(cw, ch) <= 18)
+        if not ((area >= min_area_std and max(cw, ch) >= min_span_std) or is_dash_upper):
+            continue
+        comp_sub = labels[y : y + ch, x : x + cw] == i
+        if not is_dark_scene and area < 140:
+            p75_c = float(np.percentile(contrast[y : y + ch, x : x + cw][comp_sub], 75))
+            p75_e = float(np.percentile(local_edge_max[y : y + ch, x : x + cw][comp_sub], 75))
+            p75_v = float(np.percentile(hsv[y : y + ch, x : x + cw, 2][comp_sub], 75))
+            if p75_c < max(contrast_thresh * 1.15, 45.0) or p75_e < 40.0 or p75_v < min_frag_v:
+                continue
+        clean[y : y + ch, x : x + cw][comp_sub] = 255
     return clean
 
 

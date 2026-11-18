@@ -113,10 +113,7 @@ def build_intermediate_grid(current_frame, img_thres, img_warp, img_hist,
     cw, ch = wT // 2, hT
     cell_size = (cw, ch)
 
-    gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-    diam = max(9, int(round(min(wT, hT) * 0.13)) | 1)
-    bg = cv2.morphologyEx(gray, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (diam, diam)))
-    contrast = cv2.subtract(gray, bg)
+    contrast, _, _ = utils.compute_glare_contrast(current_frame)
     contrast_vis = cv2.applyColorMap(cv2.convertScaleAbs(contrast, alpha=3.0), cv2.COLORMAP_TURBO)
     p_l1 = cv2.resize(contrast_vis, cell_size)
 

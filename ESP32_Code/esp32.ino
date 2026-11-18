@@ -5,19 +5,21 @@ const int motorPin1 = 4;  // Chan IN1 Driver L298N (Tien)
 const int motorPin2 = 2;  // Chan IN2 Driver L298N (Lui)
 
 const int pwmFreq = 5000;
-const int pwmResolution = 8; // 8-bit (0 -> 255)
+const int pwmResolution = 8; //8 bit (0-255)
 const int pwmChannel1 = 4;
 const int pwmChannel2 = 5;
 
-const int SERVO_CENTER         = 90;  // Goc thang lai chuan (dieu chinh neu xe bi lech)
+const int SERVO_CENTER         = 90;  // Góc thẳng - chuẩn
 const int SERVO_MAX_DEFLECTION = 60;  // Do lech goc lai toi da 60 do (30 den 150 do -> xoay het co khi cua va khi lui)
-const int SERVO_MIN_ANGLE      = 30;  // Gioi han goc lai toi da sang trai (30 do)
-const int SERVO_MAX_ANGLE      = 150; // Gioi han goc lai toi da sang phai (150 do)
+const int SERVO_MIN_ANGLE      = 45;  // Giới hạn servo quay trái tối đa 45 độ - ko sửa đổi
+const int SERVO_MAX_ANGLE      = 135; // Giới hạn servo quay phải tối đa 135 độ - k sửa đổi 
 const bool SERVO_INVERT        = false; // false: +error (SHARP_R) quay phai, -error (SHARP_L) quay trai (doi true neu nguoc)
 
-const int MIN_START_PWM        = 65;  
-const int MIN_REVERSE_PWM      = 100; 
-const unsigned long TIMEOUT_MS = 350; 
+
+//giatri  / 255 * 100% (giá trị PWM từ 0-255)
+const int MIN_START_PWM        = 65;  //PWM khởi động tối thiểu khi xe chạy tiến. 25.5%
+const int MIN_REVERSE_PWM      = 100; //PWM tối thiểu khi xe chạy lùi. 39.2%
+const unsigned long TIMEOUT_MS = 350; //Thời gian Watchdog, tính bằng mili giây.
 
 Servo myServo;
 unsigned long lastPacketTime = 0;
