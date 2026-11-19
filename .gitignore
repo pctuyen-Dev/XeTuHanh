@@ -12,3 +12,11 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Bo du lieu train lon (vuot gioi han 100MB cua GitHub)
+P2.NhanDienBienBao/data/data_10BienBao.zip
+P2.NhanDienBienBao/data/dataset_10BienBao/
+P2.NhanDienBienBao/yolo11_10signs_dataset/
+P2.NhanDienBienBao/yolo11_10signs_dataset.zip
+P2.NhanDienBienBao/runs_signs/
+

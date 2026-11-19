@@ -349,10 +349,25 @@ class CameraManager:
         cap.release()
         return None, None
 
-    def _try_usb_or_v4l2(self, w, h, preferred_idx=None):
-        indices = [0, 1, 2, 3]
+    def get_label(self):
+        if self._active_backend == "opencv" and self._usb_idx is not None:
+            return f"USB-{self._usb_idx}"
+        if self._active_backend == "picamera2":
+            return "CSI-PiCam"
+        if self._active_backend == "rpicam_pipe":
+            return "CSI-Pipe"
+        return self._active_backend or "NONE"
+
+    def get_usb_index(self):
+        return self._usb_idx if self._active_backend == "opencv" else None
+
+    def _try_usb_or_v4l2(self, w, h, preferred_idx=None, exclude_indices=None):
+        excluded = set(exclude_indices or ())
+        indices = [i for i in (0, 1, 2, 3) if i not in excluded]
         if preferred_idx is not None and preferred_idx in indices:
             indices = [preferred_idx] + [i for i in indices if i != preferred_idx]
+        elif preferred_idx is not None and preferred_idx not in excluded:
+            indices = [preferred_idx] + indices
         for idx in indices:
             try:
                 cap, frame = self._open_usb_capture(idx)
@@ -366,21 +381,22 @@ class CameraManager:
                 continue
         return False
 
-    def boot(self, size=(frameWidth, frameHeight), max_retries=5, retry_delay=1.5, preferred_idx=None):
+    def boot(self, size=(frameWidth, frameHeight), max_retries=5, retry_delay=1.5,
+             preferred_idx=None, exclude_indices=None, allow_csi=True):
         w, h = size[0], size[1]
         with self._io_lock:
             self.close()
 
             for attempt in range(1, max_retries + 1):
                 print(f"[CAMERA] Dang do tim va khoi dong Camera (Lan thu {attempt}/{max_retries})...")
-                if preferred_idx is None:
+                if preferred_idx is None and allow_csi:
                     if self._try_picamera2():
                         return True
                     if self._try_gstreamer(w, h):
                         return True
                     if self._try_rpicam_pipe(w, h):
                         return True
-                if self._try_usb_or_v4l2(w, h, preferred_idx=preferred_idx):
+                if self._try_usb_or_v4l2(w, h, preferred_idx=preferred_idx, exclude_indices=exclude_indices):
                     return True
 
                 if attempt < max_retries:
@@ -390,13 +406,14 @@ class CameraManager:
             print("[ERROR] Khong tim thay bat ky Camera nao sau khi thu tat ca che do!")
             return False
 
-    def switch_next_usb_camera(self, size=(frameWidth, frameHeight)):
+    def switch_next_usb_camera(self, size=(frameWidth, frameHeight), exclude_indices=None):
         """Chuyen sang camera USB tiep theo (0 -> 1 -> 2 -> 3) khi dang chay."""
+        excluded = set(exclude_indices or ())
         with self._io_lock:
             cur = self._usb_idx if self._usb_idx is not None else -1
             candidates = [(cur + offset) % 4 for offset in range(1, 5)]
             for idx in candidates:
-                if idx == self._usb_idx:
+                if idx == self._usb_idx or idx in excluded:
                     continue
                 cap, frame = self._open_usb_capture(idx)
                 if cap is not None:
@@ -478,6 +495,146 @@ def getImg(display=False, size=(frameWidth, frameHeight), fov_pct=100):
 
 def release_camera():
     _default_manager.close()
+
+
+class DualCameraRig:
+    """
+    Quan ly dong thoi 2 Camera doc lap cho Xe Tu Hanh:
+      - lane_cam: Camera 1 (nhin xuong mat duong -> Bam lan duong)
+      - sign_cam: Camera 2 (nhin thang phia truoc -> Nhan dien bien bao YOLO11n)
+    Tu dong fallback che do shared_mode neu may chi cam 1 camera, va ho tro hoan doi 2 cam tuc thi (swap).
+    """
+
+    def __init__(self):
+        self.lane_cam = CameraManager()
+        self.sign_cam = CameraManager()
+        self.shared_mode = False
+        self._rig_lock = threading.Lock()
+        self._lane_size = (frameWidth, frameHeight)
+        self._sign_size = (480, 320)
+
+    def boot(self, lane_size=(480, 240), sign_size=(480, 320),
+             lane_idx=None, sign_idx=None, max_retries=5, retry_delay=1.5):
+        self._lane_size = tuple(lane_size)
+        self._sign_size = tuple(sign_size)
+
+        ok_lane = self.lane_cam.boot(
+            size=self._lane_size,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            preferred_idx=lane_idx,
+            allow_csi=(lane_idx is None),
+        )
+        if not ok_lane:
+            return False
+
+        lane_usb = self.lane_cam.get_usb_index()
+        lane_is_csi = self.lane_cam._active_backend in ("picamera2", "rpicam_pipe")
+        exclude = [lane_usb] if lane_usb is not None else []
+
+        # Neu nguoi dung ep --sign-cam trung voi --lane-cam -> dung chung 1 cam
+        if sign_idx is not None and lane_usb is not None and sign_idx == lane_usb:
+            self.shared_mode = True
+            print(f"[DUAL-CAM] Cam Bien bao dung chung Cam Lan ({self.lane_cam.get_label()}).")
+            return True
+
+        print("[DUAL-CAM] Dang do tim Camera thu 2 cho Nhan dien Bien bao (YOLO11n)...")
+        ok_sign = self.sign_cam.boot(
+            size=self._sign_size,
+            max_retries=1,
+            retry_delay=0.3,
+            preferred_idx=sign_idx,
+            exclude_indices=exclude,
+            allow_csi=(not lane_is_csi and sign_idx is None),
+        )
+        if ok_sign:
+            self.shared_mode = False
+            print(
+                f"[DUAL-CAM OK] Da ket noi 2 Camera doc lap: "
+                f"Lan={self.lane_cam.get_label()} | Bien={self.sign_cam.get_label()}"
+            )
+        else:
+            self.shared_mode = True
+            print(
+                f"[DUAL-CAM] Chi phat hien 1 Camera ({self.lane_cam.get_label()}). "
+                "Tam dung chung cho Bien bao (bam [V] sau khi cam them cam thu 2)."
+            )
+        return True
+
+    def read_lane_frame(self, fov_pct=100):
+        with self._rig_lock:
+            cam = self.lane_cam
+            size = self._lane_size
+        return cam.read_frame(display=False, size=size, fov_pct=fov_pct)
+
+    def read_sign_frame(self, fov_pct=100):
+        with self._rig_lock:
+            if self.shared_mode:
+                return None
+            cam = self.sign_cam
+            size = self._sign_size
+        return cam.read_frame(display=False, size=size, fov_pct=fov_pct)
+
+    def switch_lane_camera(self):
+        with self._rig_lock:
+            exclude = []
+            if not self.shared_mode:
+                s_idx = self.sign_cam.get_usb_index()
+                if s_idx is not None:
+                    exclude.append(s_idx)
+            self.lane_cam.switch_next_usb_camera(size=self._lane_size, exclude_indices=exclude)
+
+    def switch_sign_camera(self):
+        with self._rig_lock:
+            l_idx = self.lane_cam.get_usb_index()
+            exclude = [l_idx] if l_idx is not None else []
+            if self.shared_mode:
+                ok = self.sign_cam.boot(
+                    size=self._sign_size,
+                    max_retries=1,
+                    retry_delay=0.2,
+                    exclude_indices=exclude,
+                    allow_csi=False,
+                )
+                if ok:
+                    self.shared_mode = False
+                    print(f"[DUAL-CAM] Da tach rieng Cam Bien bao sang {self.sign_cam.get_label()}!")
+                else:
+                    print("[DUAL-CAM] Khong tim thay camera thu 2. Van dang dung chung Cam Lan.")
+            else:
+                prev_idx = self.sign_cam.get_usb_index()
+                new_idx = self.sign_cam.switch_next_usb_camera(size=self._sign_size, exclude_indices=exclude)
+                if new_idx == prev_idx:
+                    # Cho phep quay lai che do dung chung neu khong con cam nao khac
+                    print("[DUAL-CAM] Khong con camera khac cho Bien bao.")
+
+    def swap_cameras(self):
+        """Hoan doi tuc thi Camera Lan <-> Camera Bien bao (khong can dong/mo lai USB)."""
+        with self._rig_lock:
+            if self.shared_mode:
+                print("[DUAL-CAM] Chi co 1 camera nen khong the hoan doi.")
+                return False
+            self.lane_cam, self.sign_cam = self.sign_cam, self.lane_cam
+            print(
+                f"[DUAL-CAM SWAP] Da hoan doi 2 Camera: "
+                f"Lan={self.lane_cam.get_label()} | Bien={self.sign_cam.get_label()}"
+            )
+            return True
+
+    def get_lane_label(self):
+        with self._rig_lock:
+            return self.lane_cam.get_label()
+
+    def get_sign_label(self):
+        with self._rig_lock:
+            if self.shared_mode:
+                return f"CHUNG({self.lane_cam.get_label()})"
+            return self.sign_cam.get_label()
+
+    def release_all(self):
+        with self._rig_lock:
+            self.lane_cam.close()
+            self.sign_cam.close()
 
 
 if __name__ == "__main__":

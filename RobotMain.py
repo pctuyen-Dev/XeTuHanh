@@ -12,6 +12,7 @@ REQUIRED_PACKAGES = [
     ("serial", "pyserial"),
 ]
 
+
 def ensure_dependencies():
     """Kiem tra cac thu vien cot loi; neu thieu se tu dong cai dat qua pip."""
     for module_name, pip_name in REQUIRED_PACKAGES:
@@ -60,21 +61,30 @@ except Exception as e:
     SIGN_AVAILABLE = False
     SIGN_INFO = {}
 
-# BUOC 2: BO NHO DUNG CHUNG AN TOAN DA LUONG (RobotSharedState)
+
+# BUOC 2: BO NHO DUNG CHUNG AN TOAN DA LUONG (2 CAMERA DOC LAP)
 class RobotSharedState:
-    def __init__(self):
+    def __init__(self, shared_cam=False):
         self.running = True
 
-        # 1. Du lieu Camera (Luong 1 -> Luong 2, 3)
+        # 1. Du lieu 2 Camera (Cam 1: Lan duong | Cam 2: Bien bao YOLO11n)
         self.cam_lock = threading.Lock()
-        self.latest_frame = None
-        self.frame_id = 0
-        self.frame_time = 0.0
-        self.cam_ok = False
-        self.cam_fps = 0.0
-        self.cam_fov_pct = 100  # Mac dinh 100% = do rong toi da (Full-FOV) cua webcam
+        self.lane_latest_frame = None
+        self.lane_frame_id = 0
+        self.lane_frame_time = 0.0
+        self.lane_cam_ok = False
+        self.lane_cam_fps = 0.0
 
-        # 2. Du lieu Lan duong (Luong 2 -> Luong 4 & GUI)
+        self.sign_latest_frame = None
+        self.sign_frame_id = 0
+        self.sign_frame_time = 0.0
+        self.sign_cam_ok = False
+        self.sign_cam_fps = 0.0
+
+        self.shared_cam = bool(shared_cam)
+        self.cam_fov_pct = 100  # Mac dinh 100% = Full-FOV cua camera
+
+        # 2. Du lieu Lan duong (Luong T2 -> Luong T4 & GUI)
         self.lane_lock = threading.Lock()
         self.curve_val = 0.0
         self.lane_observed = False
@@ -89,14 +99,14 @@ class RobotSharedState:
         self.lane_warp_img = None
         self.lane_hist_img = None
 
-        # 3. Du lieu Bien bao (Luong 3 -> Luong 4 & GUI)
+        # 3. Du lieu Bien bao YOLO11n (Luong T3 -> Luong T4 & GUI)
         self.sign_lock = threading.Lock()
         self.detected_signs = []
         self.sign_debug = {}
         self.sign_time = 0.0
         self.sign_fps = 0.0
 
-        # 4. Trang thai Dieu khien UART (Luong 4 -> Terminal/GUI)
+        # 4. Trang thai Dieu khien UART (Luong T4 -> Terminal/GUI)
         self.ctrl_lock = threading.Lock()
         self.last_packet = "<0,+0.00,STOP>"
         self.last_cmd = "STOP"
@@ -108,7 +118,7 @@ class RobotSharedState:
 
 
 def can_use_display():
-    """Tu dong kiem tra Pi co cam man hinh (GUI) hay dang chay SSH khong man hinh (Headless)."""
+    """Tu dong kiem tra co man hinh (GUI) hay dang chay SSH khong man hinh (Headless)."""
     if "--headless" in sys.argv:
         return False
     if os.name == "nt":
@@ -116,42 +126,98 @@ def can_use_display():
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
+def _parse_int_arg(flag_names):
+    for flag in flag_names:
+        if flag in sys.argv:
+            try:
+                ci = sys.argv.index(flag)
+                if ci + 1 < len(sys.argv):
+                    return int(sys.argv[ci + 1])
+            except Exception:
+                pass
+    return None
 
-def thread_1_camera_sense(state: RobotSharedState, frame_size=(480, 240)):
+
+def thread_1a_lane_camera(state: RobotSharedState, cam_rig: cameraModule.DualCameraRig):
+    """Luong doc Camera 1 (Lan duong). Neu may chi co 1 cam, tu dong chia se frame cho Cam 2."""
     fps_cnt = 0
     t0 = time.time()
 
     while state.running:
         with state.cam_lock:
             fov_pct = state.cam_fov_pct
-        img = cameraModule.getImg(display=False, size=frame_size, fov_pct=fov_pct)
+        img = cam_rig.read_lane_frame(fov_pct=fov_pct)
         now = time.time()
         if img is not None:
             fps_cnt += 1
+            cam_fps = None
             if fps_cnt >= 15:
                 dt = now - t0
                 cam_fps = fps_cnt / dt if dt > 0 else 0.0
                 t0 = now
                 fps_cnt = 0
-            else:
-                cam_fps = None
 
             with state.cam_lock:
-                state.latest_frame = img
-                state.frame_id += 1
-                state.frame_time = now
-                state.cam_ok = True
+                state.lane_latest_frame = img
+                state.lane_frame_id += 1
+                state.lane_frame_time = now
+                state.lane_cam_ok = True
                 if cam_fps is not None:
-                    state.cam_fps = cam_fps
+                    state.lane_cam_fps = cam_fps
+                state.shared_cam = cam_rig.shared_mode
+                if cam_rig.shared_mode:
+                    state.sign_latest_frame = img
+                    state.sign_frame_id += 1
+                    state.sign_frame_time = now
+                    state.sign_cam_ok = True
+                    if cam_fps is not None:
+                        state.sign_cam_fps = cam_fps
             time.sleep(0.002)
         else:
             with state.cam_lock:
-                state.cam_ok = False
+                state.lane_cam_ok = False
             time.sleep(0.03)
 
 
-def thread_2_lane_perception(state: RobotSharedState, frame_size=(480, 240)):
-    wT, hT = frame_size
+def thread_1b_sign_camera(state: RobotSharedState, cam_rig: cameraModule.DualCameraRig):
+    """Luong doc Camera 2 (Bien bao YOLO11n) doc lap voi Camera 1."""
+    fps_cnt = 0
+    t0 = time.time()
+
+    while state.running:
+        if cam_rig.shared_mode:
+            time.sleep(0.05)
+            continue
+
+        with state.cam_lock:
+            fov_pct = state.cam_fov_pct
+        img = cam_rig.read_sign_frame(fov_pct=fov_pct)
+        now = time.time()
+        if img is not None:
+            fps_cnt += 1
+            cam_fps = None
+            if fps_cnt >= 15:
+                dt = now - t0
+                cam_fps = fps_cnt / dt if dt > 0 else 0.0
+                t0 = now
+                fps_cnt = 0
+
+            with state.cam_lock:
+                state.sign_latest_frame = img
+                state.sign_frame_id += 1
+                state.sign_frame_time = now
+                state.sign_cam_ok = True
+                if cam_fps is not None:
+                    state.sign_cam_fps = cam_fps
+            time.sleep(0.002)
+        else:
+            with state.cam_lock:
+                state.sign_cam_ok = False
+            time.sleep(0.03)
+
+
+def thread_2_lane_perception(state: RobotSharedState, lane_size=(480, 240)):
+    wT, hT = lane_size
     detector = LaneDetector(avg_window=6)
     points = np.float32([
         (PRESET_ROBOT_TOY["w_top"], PRESET_ROBOT_TOY["h_top"]),
@@ -167,8 +233,8 @@ def thread_2_lane_perception(state: RobotSharedState, frame_size=(480, 240)):
 
     while state.running:
         with state.cam_lock:
-            fid = state.frame_id
-            frame = state.latest_frame.copy() if (state.latest_frame is not None and fid != last_processed_id) else None
+            fid = state.lane_frame_id
+            frame = state.lane_latest_frame.copy() if (state.lane_latest_frame is not None and fid != last_processed_id) else None
 
         if frame is None:
             time.sleep(0.004)
@@ -215,13 +281,13 @@ def thread_3_sign_perception(state: RobotSharedState, sign_model, sign_tracker):
     last_processed_id = -1
     fps_cnt = 0
     t0 = time.time()
-    target_period = 1.0 / 15.0 
+    target_period = 1.0 / 20.0
 
     while state.running:
         t_start = time.time()
         with state.cam_lock:
-            fid = state.frame_id
-            frame = state.latest_frame.copy() if (state.latest_frame is not None and fid != last_processed_id) else None
+            fid = state.sign_frame_id
+            frame = state.sign_latest_frame.copy() if (state.sign_latest_frame is not None and fid != last_processed_id) else None
 
         if frame is None:
             time.sleep(0.01)
@@ -230,7 +296,7 @@ def thread_3_sign_perception(state: RobotSharedState, sign_model, sign_tracker):
         last_processed_id = fid
         try:
             dets, sign_dbg = detect_traffic_signs(
-                frame, model=sign_model, tracker=sign_tracker, conf_thresh=0.62,
+                frame, model=sign_model, tracker=sign_tracker, conf_thresh=0.50,
                 return_scores=True, return_debug=True
             )
             now = time.time()
@@ -249,7 +315,7 @@ def thread_3_sign_perception(state: RobotSharedState, sign_model, sign_tracker):
                 if sign_fps is not None:
                     state.sign_fps = sign_fps
         except Exception as e:
-            print(f"[WARNING] Loi xu ly - Bien bao: {e}")
+            print(f"[WARNING] Loi xu ly Luong 3 - Bien bao YOLO11n: {e}")
 
         elapsed = time.time() - t_start
         if elapsed < target_period:
@@ -265,7 +331,7 @@ def thread_4_control_uart(state: RobotSharedState, esp32: Esp32Controller):
         loop_start = time.time()
 
         with state.cam_lock:
-            cam_ok = state.cam_ok
+            lane_cam_ok = state.lane_cam_ok
 
         with state.lane_lock:
             curve_val = state.curve_val
@@ -283,8 +349,8 @@ def thread_4_control_uart(state: RobotSharedState, esp32: Esp32Controller):
         esp_connected = bool(esp32.ser is not None and esp32.ser.is_open)
         esp_port = str(esp32.port or "")
 
-        # KIEM TRA WATCHDOG AN TOAN: Mat camera hoac du lieu lan duong qua han > 250ms -> PHANH XE NGAY
-        if (not cam_ok) or (lane_age > lane_watchdog_timeout):
+        # WATCHDOG AN TOAN: Mat Cam Lan duong hoac du lieu lan qua han > 250ms -> PHANH XE NGAY
+        if (not lane_cam_ok) or (lane_age > lane_watchdog_timeout):
             packet = esp32.stop()
             with state.ctrl_lock:
                 state.last_packet = packet
@@ -312,10 +378,11 @@ def thread_4_control_uart(state: RobotSharedState, esp32: Esp32Controller):
         if elapsed < control_period:
             time.sleep(control_period - elapsed)
 
+
 def run_robot():
-    print("=" * 72)
-    print("   KHOI DONG HE THONG XE TU HANH")
-    print("=" * 72)
+    print("=" * 76)
+    print("   KHOI DONG HE THONG XE TU HANH — 2 CAMERA DOC LAP (LAN DUONG + YOLO11n)")
+    print("=" * 76)
     esp32 = Esp32Controller(baudrate=115200)
     sign_model = None
     sign_tracker = None
@@ -323,36 +390,40 @@ def run_robot():
         try:
             sign_model = load_sign_model()
             sign_tracker = SignTracker(history_size=5, min_hits=2, max_age=3)
-            print("[OK] Da nap thanh cong Model 15 Bien bao giao thong!")
+            print(f"[OK] Da nap thanh cong Model YOLO11n ({len(sign_model.class_names)} Bien bao)!")
         except Exception as e:
-            print(f"[WARNING] Khong nap duoc file model ONNX ({e}). Tiep tuc chay bam lan.")
-    preferred_cam = None
-    if "--cam" in sys.argv:
-        try:
-            ci = sys.argv.index("--cam")
-            if ci + 1 < len(sys.argv):
-                preferred_cam = int(sys.argv[ci + 1])
-        except Exception:
-            preferred_cam = None
+            print(f"[WARNING] Khong nap duoc model YOLO11n ({e}). Tiep tuc chay bam lan.")
 
-    frame_size = (480, 240)
-    while not cameraModule.boot_camera(size=frame_size, max_retries=5, retry_delay=1.5, preferred_idx=preferred_cam):
+    lane_cam_idx = _parse_int_arg(("--lane-cam", "--cam"))
+    sign_cam_idx = _parse_int_arg(("--sign-cam",))
+
+    lane_size = (480, 240)
+    sign_size = (480, 320)
+    cam_rig = cameraModule.DualCameraRig()
+    while not cam_rig.boot(
+        lane_size=lane_size,
+        sign_size=sign_size,
+        lane_idx=lane_cam_idx,
+        sign_idx=sign_cam_idx,
+        max_retries=5,
+        retry_delay=1.5,
+    ):
         esp32.stop()
         print("[AUTO-FIX] Dang cho Camera san sang (kiem tra cap CSI / USB)... Thu lai sau 3 giay.")
         time.sleep(3.0)
 
     display_mode = 1 if can_use_display() else 0
     if display_mode == 0:
-        print("[INFO] Phat hien che do Headless (Khong man hinh) -> Tat cua so GUI de toi uu FPS.")
+        print("[INFO] Che do Headless -> Tat cua so GUI de toi uu FPS.")
     else:
-        print("[INFO] Che do hien thi GUI: BAT (Nhan 'q' de dung | 'c' hoac bam nut 'Doi Cam [C]' de chuyen camera).")
+        print("[INFO] Giao dien Quan sat 2 Camera: BAT ([C] Cam Lan | [V] Cam Bien | [X] Hoan doi | [D] Che do | [Q] Thoat).")
 
-    state = RobotSharedState()
+    state = RobotSharedState(shared_cam=cam_rig.shared_mode)
 
-    # 4. Khoi chạy 4 Luong song song
     threads = [
-        threading.Thread(target=thread_1_camera_sense, args=(state, frame_size), name="T1-Camera", daemon=True),
-        threading.Thread(target=thread_2_lane_perception, args=(state, frame_size), name="T2-Lane", daemon=True),
+        threading.Thread(target=thread_1a_lane_camera, args=(state, cam_rig), name="T1A-LaneCam", daemon=True),
+        threading.Thread(target=thread_1b_sign_camera, args=(state, cam_rig), name="T1B-SignCam", daemon=True),
+        threading.Thread(target=thread_2_lane_perception, args=(state, lane_size), name="T2-Lane", daemon=True),
         threading.Thread(target=thread_3_sign_perception, args=(state, sign_model, sign_tracker), name="T3-Sign", daemon=True),
         threading.Thread(target=thread_4_control_uart, args=(state, esp32), name="T4-Control", daemon=True),
     ]
@@ -369,11 +440,11 @@ def run_robot():
         while state.running:
             now = time.time()
 
-            # In trang thai dinh ky moi 0.5 giay ra Terminal
             if now - last_log_time >= 0.50:
                 last_log_time = now
                 with state.cam_lock:
-                    c_fps = state.cam_fps
+                    lc_fps = state.lane_cam_fps
+                    sc_fps = state.sign_cam_fps
                 with state.lane_lock:
                     l_fps = state.lane_fps
                     l_state = state.lane_state
@@ -386,13 +457,12 @@ def run_robot():
                     s_act = state.last_sign_action or "Khong"
 
                 print(
-                    f"[4-THREADS] Cam:{c_fps:4.1f}fps | Lane:{l_fps:4.1f}fps ({l_state:<9}, Light:{light_mode:<6}) "
-                    f"| Sign:{s_fps:4.1f}fps ({s_act:<16}) | Lech:{err:+.2f} | UART->{pkt}"
+                    f"[DUAL-CAM] C1:{lc_fps:4.1f}fps C2:{sc_fps:4.1f}fps | Lane:{l_fps:4.1f}fps ({l_state:<9}, {light_mode:<6}) "
+                    f"| YOLO:{s_fps:4.1f}fps ({s_act:<16}) | Lech:{err:+.2f} | UART->{pkt}"
                 )
 
-            # Hien thi cua so GUI qua RobotUI (neu co man hinh)
             if ui is not None and ui.available:
-                if not ui.render_and_poll(state, cameraModule, frame_size, SIGN_INFO):
+                if not ui.render_and_poll(state, cam_rig, SIGN_INFO):
                     break
             else:
                 time.sleep(0.05)
@@ -403,9 +473,9 @@ def run_robot():
         state.running = False
         for t in threads:
             t.join(timeout=0.5)
-        print("[SAFE STOP] Dang phanh xe va giai phong Camera...")
+        print("[SAFE STOP] Dang phanh xe va giai phong 2 Camera...")
         esp32.stop()
-        cameraModule.release_camera()
+        cam_rig.release_all()
         if ui is not None:
             ui.close()
 
