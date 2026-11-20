@@ -75,10 +75,7 @@ def configure_wide_fov_webcam(cap, target_fps=30):
 
 
 def apply_fov_width(frame, fov_pct=100):
-    """
-    Dieu chinh do rong goc nhin (FOV) theo ty le % (40..100).
-    Mac dinh 100% = giu nguyen 100% khung hinh goc Full-FOV cua webcam (khong crop).
-    """
+
     if frame is None or fov_pct >= 100:
         return frame
     h, w = frame.shape[:2]

@@ -36,14 +36,14 @@ try:
         load_sign_model,
         SignTracker,
         SIGN_INFO,
-        YOLO_CLASSES_10,
+        YOLO_CLASSES,
     )
     SIGN_MODULE_AVAILABLE = True
 except Exception as e:
     print(f"[WARNING] Khong the tai module TrafficSignDetectionModule: {e}")
     SIGN_MODULE_AVAILABLE = False
     SIGN_INFO = {}
-    YOLO_CLASSES_10 = []
+    YOLO_CLASSES = []
 
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
