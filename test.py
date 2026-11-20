@@ -65,6 +65,15 @@ PRESET_ROBOT_TOY = {
     "h_min": 0, "h_max": 179, "s_min": 0, "s_max": 85, "v_min": 170, "v_max": 255,
 }
 
+BGR_SUBCARD = (26, 21, 18)
+BGR_HEADER_BAR = (42, 34, 30)
+BGR_BORDER_CARD = (63, 52, 45)
+BGR_CYAN = (250, 165, 96)
+BGR_GREEN = (153, 211, 52)
+BGR_AMBER = (65, 184, 245)
+BGR_WHITE = (242, 236, 232)
+BGR_MUTED = (135, 119, 110)
+
 
 def is_highway_source(src):
     if not isinstance(src, str):
@@ -89,63 +98,60 @@ class PiCameraCapture:
         self._mgr.close()
 
 
-def _decorate_cell(cell, title, accent_text, bg_hdr, border_col):
+def _decorate_cell(cell, title, accent_text=BGR_CYAN):
     ch, cw = cell.shape[:2]
-    cv2.rectangle(cell, (0, 0), (cw - 1, 22), bg_hdr, cv2.FILLED)
-    cv2.rectangle(cell, (0, 0), (cw - 1, ch - 1), border_col, 1)
+    cv2.rectangle(cell, (0, 0), (cw - 1, 22), BGR_HEADER_BAR, cv2.FILLED)
+    cv2.rectangle(cell, (0, 0), (cw - 1, ch - 1), BGR_BORDER_CARD, 1)
     cv2.putText(cell, title, (6, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.38, accent_text, 1, cv2.LINE_AA)
     return cell
 
 
 def build_lane_steps_grid(lane_frame, img_thres, img_warp, img_hist, is_highway,
                           wT, hT, boundary_traces=None):
-    """Luoi 2x2 hien thi 4 buoc trung gian cua Camera 1 (Lan duong)."""
-    cw, ch = wT // 2, hT // 2
-    cw, ch = max(240, cw), max(150, ch)
+    cw, ch = max(240, wT // 2), max(150, hT // 2)
     cell_size = (cw, ch)
 
     contrast, _, _ = utils.compute_glare_contrast(lane_frame)
     contrast_vis = cv2.applyColorMap(cv2.convertScaleAbs(contrast, alpha=3.0), cv2.COLORMAP_TURBO)
-    p1 = _decorate_cell(cv2.resize(contrast_vis, cell_size), "1. Top-Hat Khu Bong", (120, 255, 160), (18, 28, 22), (60, 110, 75))
+    p1 = _decorate_cell(cv2.resize(contrast_vis, cell_size), "1. Top-Hat Khu Bong", BGR_GREEN)
 
-    thres_bgr = cv2.cvtColor(img_thres, cv2.COLOR_GRAY2BGR)
-    thres_bgr[img_thres > 0] = (160, 255, 175)
-    p2 = _decorate_cell(cv2.resize(thres_bgr, cell_size), "2. Mat Na Nhi Phan", (120, 255, 160), (18, 28, 22), (60, 110, 75))
+    thres_bgr = np.full((img_thres.shape[0], img_thres.shape[1], 3), (18, 15, 13), dtype=np.uint8)
+    thres_bgr[img_thres > 0] = BGR_GREEN
+    p2 = _decorate_cell(cv2.resize(thres_bgr, cell_size), "2. Mat Na Nhi Phan", BGR_GREEN)
 
     p3 = cv2.resize(img_warp, cell_size)
     for gx in range(cw // 4, cw, cw // 4):
-        cv2.line(p3, (gx, 22), (gx, ch), (55, 65, 65), 1)
-    p3 = _decorate_cell(p3, "3. Bird-Eye Warp", (120, 255, 160), (18, 28, 22), (60, 110, 75))
+        cv2.line(p3, (gx, 22), (gx, ch), BGR_BORDER_CARD, 1)
+    p3 = _decorate_cell(p3, "3. Bird-Eye Warp", BGR_GREEN)
 
     hist_vis = img_hist.copy()
     if boundary_traces:
         for tr in boundary_traces:
             pts = np.asarray(tr, dtype=np.int32)
-            cv2.polylines(hist_vis, [pts], False, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.polylines(hist_vis, [pts], False, BGR_AMBER, 2, cv2.LINE_AA)
     else:
         skel = utils.thin_mask(img_thres) if not is_highway else cv2.Canny(img_thres, 50, 150)
-        hist_vis[skel > 0] = (0, 255, 255)
-    p4 = _decorate_cell(cv2.resize(hist_vis, cell_size), "4. Xuong & Histogram", (120, 255, 160), (18, 28, 22), (60, 110, 75))
+        hist_vis[skel > 0] = BGR_AMBER
+    p4 = _decorate_cell(cv2.resize(hist_vis, cell_size), "4. Xuong & Histogram", BGR_GREEN)
 
     return np.vstack([np.hstack([p1, p2]), np.hstack([p3, p4])])
 
 
 def build_sign_steps_grid(sign_frame, detected_signs, sign_debug, wT, hT):
-    """Luoi 2x2 hien thi 4 buoc xu ly cua Camera 2 (Bien bao YOLO11n)."""
     cw, ch = max(240, wT // 2), max(160, hT // 2)
     cell_size = (cw, ch)
 
-    p1 = _decorate_cell(cv2.resize(sign_frame, cell_size), "1. Anh Goc Cam 2", (110, 220, 255), (18, 24, 34), (65, 95, 130))
+    p1 = _decorate_cell(cv2.resize(sign_frame, cell_size), "1. Anh Goc Cam 2", BGR_CYAN)
 
     lb = sign_debug.get("letterbox_img") if sign_debug else None
-    p2_raw = cv2.resize(lb, cell_size) if (lb is not None and lb.size > 0) else np.zeros((ch, cw, 3), dtype=np.uint8)
-    p2 = _decorate_cell(p2_raw, "2. Letterbox YOLO11n", (110, 220, 255), (18, 24, 34), (65, 95, 130))
+    p2_raw = cv2.resize(lb, cell_size) if (lb is not None and lb.size > 0) else np.full((ch, cw, 3), BGR_SUBCARD, dtype=np.uint8)
+    p2 = _decorate_cell(p2_raw, "2. Letterbox YOLO11n", BGR_CYAN)
 
     yvis = sign_debug.get("yolo_vis") if sign_debug else None
     p3_raw = cv2.resize(yvis, cell_size) if (yvis is not None and yvis.size > 0) else cv2.resize(sign_frame, cell_size)
-    p3 = _decorate_cell(p3_raw, "3. Phat Hien YOLO11n", (110, 220, 255), (18, 24, 34), (65, 95, 130))
+    p3 = _decorate_cell(p3_raw, "3. Phat Hien YOLO11n", BGR_CYAN)
 
-    p4 = np.full((ch, cw, 3), (18, 22, 30), dtype=np.uint8)
+    p4 = np.full((ch, cw, 3), BGR_SUBCARD, dtype=np.uint8)
     previews = sign_debug.get("yolo_previews", []) if sign_debug else []
     items = []
     if detected_signs:
@@ -165,16 +171,16 @@ def build_sign_steps_grid(sign_frame, detected_signs, sign_debug, wT, hT):
             if ty + 54 < ch:
                 if sub is not None and sub.size > 0:
                     p4[ty:ty + 54, 10:64] = cv2.resize(sub, (54, 54), interpolation=cv2.INTER_AREA)
-                b_col = (0, 240, 130) if is_ok else (0, 165, 255)
+                b_col = BGR_GREEN if is_ok else BGR_AMBER
                 cv2.rectangle(p4, (10, ty), (64, ty + 54), b_col, 1)
                 vn_name = SIGN_INFO.get(cls_name, {"vn": cls_name})["vn"]
                 st = "NHAN" if is_ok else "THAP"
-                cv2.putText(p4, vn_name[:16], (72, ty + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (235, 242, 250), 1, cv2.LINE_AA)
+                cv2.putText(p4, vn_name[:16], (72, ty + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.42, BGR_WHITE, 1, cv2.LINE_AA)
                 cv2.putText(p4, f"{sc:.0%} [{st}]", (72, ty + 44), cv2.FONT_HERSHEY_SIMPLEX, 0.40, b_col, 1, cv2.LINE_AA)
     else:
         msg = "Chua nap YOLO11n" if not sign_debug else "Khong co bien bao"
-        cv2.putText(p4, msg, (cw // 2 - 58, ch // 2 + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (130, 140, 155), 1, cv2.LINE_AA)
-    p4 = _decorate_cell(p4, "4. Crop & Do Tin Cay", (110, 220, 255), (18, 24, 34), (65, 95, 130))
+        cv2.putText(p4, msg, (cw // 2 - 58, ch // 2 + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, BGR_MUTED, 1, cv2.LINE_AA)
+    p4 = _decorate_cell(p4, "4. Crop & Do Tin Cay", BGR_CYAN)
 
     return np.vstack([np.hstack([p1, p2]), np.hstack([p3, p4])])
 
@@ -212,18 +218,45 @@ def _open_camera_capture(idx, size):
 
 
 class XeTuHanhTestApp:
-    """Man hinh Quan sat & Kiem thu 2 Camera Doc lap (Cam 1 Lan duong | Cam 2 Bien bao YOLO11n)."""
+    WIN_W = 1280
+    WIN_H = 740
+    PAD_X = 12
+    GAP_X = 10
+    CARD_W = (WIN_W - PAD_X * 2 - GAP_X) // 2
+    CAM_CARD_H = 426
+    VIEW_W = CARD_W - 14
+    VIEW_H = 345
 
-    BG_DARK = "#0a101b"
-    BG_PANEL = "#111a2b"
-    BG_CARD = "#172338"
-    BG_BORDER = "#243552"
-    ACCENT_BLUE = "#1d6fe8"
-    ACCENT_GREEN = "#16a34a"
-    ACCENT_CYAN = "#06b6d4"
-    ACCENT_AMBER = "#d97706"
-    TEXT_PRIMARY = "#eef4ff"
-    TEXT_MUTED = "#8fa3c4"
+    BG_CANVAS = "#0f1115"
+    BG_HEADER_TOP = "#15181e"
+    BG_CARD = "#181b21"
+    BG_SUBCARD = "#12151a"
+    BG_HEADER_BAR = "#1e222a"
+    BG_PILL = "#21262f"
+    BG_PILL_HOVER = "#2b313d"
+
+    BORDER_CARD = "#2d343f"
+    BORDER_SUB = "#252a34"
+    BORDER_BTN = "#38404e"
+    BORDER_DIM = "#222730"
+
+    COL_ACCENT = "#3b82f6"
+    COL_CYAN = "#60a5fa"
+    COL_BLUE = "#93c5fd"
+    COL_TINT_BG = "#182538"
+    COL_TINT_HOVER = "#1f314a"
+    COL_TINT_BORDER = "#2d4c78"
+
+    COL_GREEN = "#34d399"
+    COL_AMBER = "#f5b841"
+    COL_ORANGE = "#f0843c"
+    COL_RED = "#f87171"
+
+    TXT_WHITE = "#e8ecf2"
+    TXT_SOFT = "#a8b2c1"
+    TXT_MUTED = "#6e7787"
+
+    SUBCARD_RGB = (18, 21, 26)
 
     def __init__(self, root, args):
         self.root = root
@@ -233,12 +266,11 @@ class XeTuHanhTestApp:
         self.sign_wT = 480
         self.sign_hT = 320
 
-        self.root.title("Trạm Quan Sát 2 Camera — Xe Tự Hành (Làn Đường & Biển Báo YOLO11n)")
-        self.root.configure(bg=self.BG_DARK)
-        self.root.geometry("1320x840")
-        self.root.minsize(1100, 700)
+        self.root.title("Xe Tự Hành — Kiểm Thử 2 Camera")
+        self.root.configure(bg=self.BG_CANVAS)
+        self.root.geometry(f"{self.WIN_W}x{self.WIN_H}")
+        self.root.resizable(False, False)
 
-        # Nguon CAM 1 (Lan duong)
         self.lane_cap = None
         self.lane_source = None
         self.lane_is_static = False
@@ -246,7 +278,6 @@ class XeTuHanhTestApp:
         self.lane_frame = None
         self.last_lane_vis = None
 
-        # Nguon CAM 2 (Bien bao YOLO11n)
         self.sign_cap = None
         self.sign_source = None
         self.sign_is_static = False
@@ -260,7 +291,6 @@ class XeTuHanhTestApp:
         self.lane_fps = 0.0
         self.sign_fps = 0.0
         self.last_proc_ms = 0.0
-        self.last_terminal_sign_sig = None
         self.last_table_sig = None
 
         self.detector = LaneDetector(avg_window=8)
@@ -270,7 +300,6 @@ class XeTuHanhTestApp:
         self.latest_detected_signs = []
         self.latest_sign_debug = {}
 
-        # Nap model YOLO11n
         self.sign_model = None
         self.sign_tracker = None
         if SIGN_MODULE_AVAILABLE:
@@ -281,7 +310,6 @@ class XeTuHanhTestApp:
             except Exception as e:
                 print(f"[WARNING] Loi khoi tao model YOLO11n: {e}")
 
-        # Bien giao dien
         self.var_lane_cam = tk.StringVar(value="Cam 0")
         self.var_sign_cam = tk.StringVar(value="Cam 1")
         self.var_lane_view = tk.StringVar(value="Kết quả Làn")
@@ -306,252 +334,409 @@ class XeTuHanhTestApp:
         style = ttk.Style()
         style.theme_use("clam")
         style.configure(
-            "Dark.TCombobox",
-            fieldbackground=self.BG_CARD,
-            background=self.BG_CARD,
-            foreground=self.TEXT_PRIMARY,
-            arrowcolor=self.ACCENT_CYAN,
-            bordercolor=self.BG_BORDER,
-            lightcolor=self.BG_BORDER,
-            darkcolor=self.BG_BORDER,
+            "Main.TCombobox",
+            fieldbackground=self.BG_PILL,
+            background=self.BG_PILL,
+            foreground=self.TXT_WHITE,
+            arrowcolor=self.COL_CYAN,
+            bordercolor=self.BORDER_BTN,
+            lightcolor=self.BORDER_BTN,
+            darkcolor=self.BORDER_BTN,
+            selectbackground=self.COL_TINT_BG,
+            selectforeground=self.TXT_WHITE,
         )
-        style.map("Dark.TCombobox", fieldbackground=[("readonly", self.BG_CARD)], foreground=[("readonly", self.TEXT_PRIMARY)])
+        style.map(
+            "Main.TCombobox",
+            fieldbackground=[("readonly", self.BG_PILL)],
+            foreground=[("readonly", self.TXT_WHITE)],
+            bordercolor=[("focus", self.COL_TINT_BORDER)],
+        )
+        self.root.option_add("*TCombobox*Listbox.background", self.BG_CARD)
+        self.root.option_add("*TCombobox*Listbox.foreground", self.TXT_WHITE)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", self.COL_TINT_BG)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", self.COL_BLUE)
+
         style.configure(
             "Sign.Treeview",
-            background="#0e1726",
-            foreground=self.TEXT_PRIMARY,
-            fieldbackground="#0e1726",
+            background=self.BG_SUBCARD,
+            foreground=self.TXT_WHITE,
+            fieldbackground=self.BG_SUBCARD,
             borderwidth=0,
             rowheight=24,
             font=("Segoe UI", 9),
         )
         style.configure(
             "Sign.Treeview.Heading",
-            background="#192842",
-            foreground="#b9d1f5",
-            borderwidth=1,
+            background=self.BG_HEADER_BAR,
+            foreground=self.TXT_SOFT,
+            borderwidth=0,
             relief="flat",
             font=("Segoe UI", 9, "bold"),
         )
-        style.map("Sign.Treeview", background=[("selected", "#214578")], foreground=[("selected", "#ffffff")])
+        style.map(
+            "Sign.Treeview",
+            background=[("selected", self.COL_TINT_BG)],
+            foreground=[("selected", self.COL_BLUE)],
+        )
+        style.configure(
+            "Main.Vertical.TScrollbar",
+            background=self.BG_PILL,
+            troughcolor=self.BG_SUBCARD,
+            bordercolor=self.BG_SUBCARD,
+            arrowcolor=self.TXT_SOFT,
+        )
+
+    def _make_btn(self, parent, text, command, tinted=False, width=None, padx=9, pady=3):
+        bg = self.COL_TINT_BG if tinted else self.BG_PILL
+        hover = self.COL_TINT_HOVER if tinted else self.BG_PILL_HOVER
+        fg = self.COL_BLUE if tinted else self.TXT_WHITE
+        border = self.COL_TINT_BORDER if tinted else self.BORDER_BTN
+
+        btn = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=bg,
+            fg=fg,
+            activebackground=hover,
+            activeforeground=fg,
+            font=("Segoe UI", 8, "bold"),
+            bd=0,
+            padx=padx,
+            pady=pady,
+            cursor="hand2",
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=border,
+            highlightcolor=border,
+            width=width,
+        )
+        btn._base_bg = bg
+        btn._hover_bg = hover
+        btn.bind("<Enter>", lambda e, b=btn: b.config(bg=b._hover_bg))
+        btn.bind("<Leave>", lambda e, b=btn: b.config(bg=b._base_bg))
+        return btn
+
+    def _set_btn_style(self, btn, tinted=False, text=None):
+        bg = self.COL_TINT_BG if tinted else self.BG_PILL
+        hover = self.COL_TINT_HOVER if tinted else self.BG_PILL_HOVER
+        fg = self.COL_BLUE if tinted else self.TXT_WHITE
+        border = self.COL_TINT_BORDER if tinted else self.BORDER_BTN
+        btn._base_bg = bg
+        btn._hover_bg = hover
+        cfg = {
+            "bg": bg,
+            "fg": fg,
+            "activebackground": hover,
+            "activeforeground": fg,
+            "highlightbackground": border,
+            "highlightcolor": border,
+        }
+        if text is not None:
+            cfg["text"] = text
+        btn.config(**cfg)
 
     def _build_ui(self):
-        btn_cfg = {"font": ("Segoe UI", 8, "bold"), "bd": 0, "padx": 8, "pady": 4, "cursor": "hand2", "relief": "flat"}
-
-        # 1. TOP HEADER (TRANG THAI 2 CAM + NUT NHANH)
-        header = tk.Frame(self.root, bg=self.BG_DARK, pady=6, padx=12)
+        header = tk.Frame(self.root, bg=self.BG_HEADER_TOP, height=46)
         header.pack(fill="x")
+        header.pack_propagate(False)
 
-        top_row = tk.Frame(header, bg=self.BG_DARK)
-        top_row.pack(fill="x", pady=(0, 6))
+        header_inner = tk.Frame(header, bg=self.BG_HEADER_TOP)
+        header_inner.pack(fill="both", expand=True, padx=self.PAD_X)
+
         tk.Label(
-            top_row, text="🛰  TRẠM QUAN SÁT 2 CAMERA — XE TỰ HÀNH",
-            font=("Segoe UI", 12, "bold"), fg=self.TEXT_PRIMARY, bg=self.BG_DARK
-        ).pack(side="left")
+            header_inner,
+            text="XE TỰ HÀNH — KIỂM THỬ 2 CAMERA",
+            font=("Segoe UI", 12, "bold"),
+            fg=self.TXT_WHITE,
+            bg=self.BG_HEADER_TOP,
+        ).pack(side="left", pady=10)
 
-        # Nhom nut thao tac nhanh ben phai header
-        quick_bar = tk.Frame(top_row, bg=self.BG_DARK)
-        quick_bar.pack(side="right")
-        tk.Button(quick_bar, text="📷 Mở 2 Camera", bg=self.ACCENT_GREEN, fg="white", activebackground="#22c55e",
-                  command=self.action_open_both_cameras, **btn_cfg).pack(side="left", padx=3)
-        tk.Button(quick_bar, text="⇄ Đổi chỗ 2 Cam", bg=self.ACCENT_AMBER, fg="white", activebackground="#f59e0b",
-                  command=self.action_swap_cameras, **btn_cfg).pack(side="left", padx=3)
-        self.btn_pause = tk.Button(quick_bar, text="⏸ Tạm dừng", bg=self.ACCENT_BLUE, fg="white",
-                                   activebackground="#3b82f6", command=self.action_toggle_pause, **btn_cfg)
-        self.btn_pause.pack(side="left", padx=3)
-        tk.Button(quick_bar, text="↻ Reset", bg=self.BG_CARD, fg=self.TEXT_PRIMARY, activebackground="#243552",
-                  command=self.action_reset, **btn_cfg).pack(side="left", padx=3)
-        tk.Button(quick_bar, text="💾 Lưu 2 Khung", bg=self.BG_CARD, fg=self.TEXT_PRIMARY, activebackground="#243552",
-                  command=self.action_save_snapshot, **btn_cfg).pack(side="left", padx=(3, 0))
+        quick_bar = tk.Frame(header_inner, bg=self.BG_HEADER_TOP)
+        quick_bar.pack(side="right", pady=8)
 
-        # 2. THANH CONG CU 2 CUM RIENG BIET (CAM 1 LAN DUONG | CAM 2 BIEN BAO)
-        ctrl_row = tk.Frame(header, bg=self.BG_DARK)
-        ctrl_row.pack(fill="x")
-        ctrl_row.columnconfigure(0, weight=1)
-        ctrl_row.columnconfigure(1, weight=1)
+        self._make_btn(quick_bar, "Mở 2 Cam", self.action_open_both_cameras, tinted=True).pack(side="left", padx=(0, 6))
+        self._make_btn(quick_bar, "Đổi chỗ", self.action_swap_cameras).pack(side="left", padx=(0, 6))
+        self.btn_pause = self._make_btn(quick_bar, "Tạm dừng", self.action_toggle_pause)
+        self.btn_pause.pack(side="left", padx=(0, 6))
+        self._make_btn(quick_bar, "Reset", self.action_reset).pack(side="left", padx=(0, 6))
+        self._make_btn(quick_bar, "Lưu ảnh", self.action_save_snapshot).pack(side="left", padx=(0, 10))
 
-        # Cum trai: Dieu khien CAM 1 (Lan duong)
-        lane_tb = tk.Frame(ctrl_row, bg=self.BG_PANEL, padx=8, pady=5, highlightbackground="#1f5c3a", highlightthickness=1)
-        lane_tb.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-        tk.Label(lane_tb, text="CAM 1 (Làn):", fg="#4ade80", bg=self.BG_PANEL, font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 4))
-        cb_lcam = ttk.Combobox(lane_tb, textvariable=self.var_lane_cam, values=["Cam 0", "Cam 1", "Cam 2", "Cam 3"],
-                               width=6, state="readonly", style="Dark.TCombobox", font=("Segoe UI", 8))
-        cb_lcam.pack(side="left", padx=(0, 3))
+        self._make_btn(quick_bar, "-", lambda: self._adjust_fov(-10), width=2, padx=2).pack(side="left")
+        self.btn_fov = self._make_btn(quick_bar, "FOV: 100%", self._reset_fov, tinted=True, padx=7)
+        self.btn_fov.pack(side="left", padx=2)
+        self._make_btn(quick_bar, "+", lambda: self._adjust_fov(10), width=2, padx=2).pack(side="left")
+
+        tk.Frame(self.root, bg=self.BORDER_DIM, height=1).pack(fill="x")
+
+        views_frame = tk.Frame(self.root, bg=self.BG_CANVAS, height=self.CAM_CARD_H)
+        views_frame.pack(fill="x", padx=self.PAD_X, pady=(8, 0))
+        views_frame.pack_propagate(False)
+
+        left_card = tk.Frame(
+            views_frame, bg=self.BG_CARD, width=self.CARD_W, height=self.CAM_CARD_H,
+            highlightbackground=self.BORDER_CARD, highlightthickness=1,
+        )
+        left_card.pack(side="left")
+        left_card.pack_propagate(False)
+
+        left_hdr = tk.Frame(left_card, bg=self.BG_HEADER_BAR, height=32)
+        left_hdr.pack(fill="x")
+        left_hdr.pack_propagate(False)
+        tk.Label(
+            left_hdr, text="CAM 1 – LÀN ĐƯỜNG",
+            font=("Segoe UI", 9, "bold"), fg=self.TXT_WHITE, bg=self.BG_HEADER_BAR,
+        ).pack(side="left", padx=(10, 8))
+        self.lbl_cam1_src = tk.Label(
+            left_hdr, text="Chưa chọn",
+            font=("Segoe UI", 8, "bold"), fg=self.TXT_MUTED, bg=self.BG_SUBCARD,
+            padx=7, pady=1, highlightbackground=self.BORDER_SUB, highlightthickness=1,
+        )
+        self.lbl_cam1_src.pack(side="left", pady=5)
+        self.lbl_lane_badge = tk.Label(
+            left_hdr, text="NORMAL  |  0.0 FPS",
+            font=("Segoe UI", 8, "bold"), fg=self.COL_CYAN, bg=self.BG_HEADER_BAR,
+        )
+        self.lbl_lane_badge.pack(side="right", padx=10)
+
+        tk.Frame(left_card, bg=self.BORDER_DIM, height=1).pack(fill="x")
+
+        left_tb = tk.Frame(left_card, bg=self.BG_HEADER_TOP, height=34)
+        left_tb.pack(fill="x")
+        left_tb.pack_propagate(False)
+
+        cb_lcam = ttk.Combobox(
+            left_tb, textvariable=self.var_lane_cam, values=["Cam 0", "Cam 1", "Cam 2", "Cam 3"],
+            width=6, state="readonly", style="Main.TCombobox", font=("Segoe UI", 8),
+        )
+        cb_lcam.pack(side="left", padx=(8, 4), pady=5)
         cb_lcam.bind("<<ComboboxSelected>>", lambda e: self.action_open_lane_cam())
-        tk.Button(lane_tb, text="Mở", bg="#15803d", fg="white", command=self.action_open_lane_cam, **btn_cfg).pack(side="left", padx=(0, 4))
-        tk.Button(lane_tb, text="🎞 Video", bg="#4f46e5", fg="white", command=self.action_pick_lane_video, **btn_cfg).pack(side="left", padx=(0, 3))
-        tk.Button(lane_tb, text="📁 Ảnh", bg=self.ACCENT_BLUE, fg="white", command=self.action_pick_lane_image, **btn_cfg).pack(side="left", padx=(0, 6))
 
-        cb_lview = ttk.Combobox(lane_tb, textvariable=self.var_lane_view,
-                                values=["Kết quả Làn", "4 Bước Làn", "Ảnh gốc + ROI"],
-                                width=12, state="readonly", style="Dark.TCombobox", font=("Segoe UI", 8))
-        cb_lview.pack(side="left", padx=(0, 4))
-        cb_preset = ttk.Combobox(lane_tb, textvariable=self.var_preset, values=["Robot sân nhà", "Đường cao tốc"],
-                                 width=12, state="readonly", style="Dark.TCombobox", font=("Segoe UI", 8))
-        cb_preset.pack(side="left", padx=(0, 4))
+        self._make_btn(left_tb, "Video", self.action_pick_lane_video, padx=7, pady=2).pack(side="left", padx=(0, 4), pady=4)
+        self._make_btn(left_tb, "Ảnh", self.action_pick_lane_image, padx=7, pady=2).pack(side="left", padx=(0, 8), pady=4)
+
+        ttk.Combobox(
+            left_tb, textvariable=self.var_lane_view,
+            values=["Kết quả Làn", "4 Bước Làn", "Ảnh gốc + ROI"],
+            width=12, state="readonly", style="Main.TCombobox", font=("Segoe UI", 8),
+        ).pack(side="left", padx=(0, 4), pady=5)
+
+        cb_preset = ttk.Combobox(
+            left_tb, textvariable=self.var_preset, values=["Robot sân nhà", "Đường cao tốc"],
+            width=12, state="readonly", style="Main.TCombobox", font=("Segoe UI", 8),
+        )
+        cb_preset.pack(side="left", padx=(0, 4), pady=5)
         cb_preset.bind("<<ComboboxSelected>>", lambda e: self.action_change_preset())
-        cb_roi = ttk.Combobox(lane_tb, textvariable=self.var_roi_mode, values=["Mở rộng cua", "Chỉ trong ROI"],
-                              width=11, state="readonly", style="Dark.TCombobox", font=("Segoe UI", 8))
-        cb_roi.pack(side="left")
+
+        cb_roi = ttk.Combobox(
+            left_tb, textvariable=self.var_roi_mode, values=["Mở rộng cua", "Chỉ trong ROI"],
+            width=11, state="readonly", style="Main.TCombobox", font=("Segoe UI", 8),
+        )
+        cb_roi.pack(side="left", padx=(0, 4), pady=5)
         cb_roi.bind("<<ComboboxSelected>>", lambda e: self.detector.reset())
 
-        # Cum phai: Dieu khien CAM 2 (Bien bao YOLO11n)
-        sign_tb = tk.Frame(ctrl_row, bg=self.BG_PANEL, padx=8, pady=5, highlightbackground="#165a72", highlightthickness=1)
-        sign_tb.grid(row=0, column=1, sticky="ew", padx=(5, 0))
-        tk.Label(sign_tb, text="CAM 2 (Biển):", fg="#38bdf8", bg=self.BG_PANEL, font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 4))
-        cb_scam = ttk.Combobox(sign_tb, textvariable=self.var_sign_cam,
-                               values=["Cam 1", "Cam 0", "Cam 2", "Cam 3", "Chung Cam 1"],
-                               width=11, state="readonly", style="Dark.TCombobox", font=("Segoe UI", 8))
-        cb_scam.pack(side="left", padx=(0, 3))
-        cb_scam.bind("<<ComboboxSelected>>", lambda e: self.action_open_sign_cam())
-        tk.Button(sign_tb, text="Mở", bg="#0284c7", fg="white", command=self.action_open_sign_cam, **btn_cfg).pack(side="left", padx=(0, 4))
-        tk.Button(sign_tb, text="🎞 Video", bg="#6d28d9", fg="white", command=self.action_pick_sign_video, **btn_cfg).pack(side="left", padx=(0, 3))
-        tk.Button(sign_tb, text="📁 Ảnh", bg=self.ACCENT_BLUE, fg="white", command=self.action_pick_sign_image, **btn_cfg).pack(side="left", padx=(0, 3))
-        tk.Button(sign_tb, text="🪧 Mẫu", bg=self.ACCENT_AMBER, fg="white", command=self.action_open_sample_sign, **btn_cfg).pack(side="left", padx=(0, 6))
+        tk.Checkbutton(
+            left_tb, text="Bật", variable=self.var_enable_lane,
+            bg=self.BG_HEADER_TOP, fg=self.TXT_SOFT, selectcolor=self.BG_PILL,
+            activebackground=self.BG_HEADER_TOP, activeforeground=self.TXT_WHITE,
+            font=("Segoe UI", 8), cursor="hand2",
+        ).pack(side="right", padx=(0, 6))
 
-        cb_sview = ttk.Combobox(sign_tb, textvariable=self.var_sign_view,
-                                values=["Kết quả YOLO11n", "4 Bước YOLO11n"],
-                                width=14, state="readonly", style="Dark.TCombobox", font=("Segoe UI", 8))
-        cb_sview.pack(side="left", padx=(0, 6))
-
-        tk.Button(sign_tb, text="-", bg=self.BG_CARD, fg="white", width=2, bd=0, cursor="hand2",
-                  command=lambda: self._adjust_fov(-10)).pack(side="left")
-        self.lbl_fov = tk.Label(sign_tb, text="FOV:100%", fg=self.ACCENT_CYAN, bg=self.BG_CARD,
-                                font=("Segoe UI", 8, "bold"), padx=5, pady=3)
-        self.lbl_fov.pack(side="left", padx=1)
-        tk.Button(sign_tb, text="+", bg=self.BG_CARD, fg="white", width=2, bd=0, cursor="hand2",
-                  command=lambda: self._adjust_fov(10)).pack(side="left")
-
-        # 3. HAI MAN HINH QUAN SAT LON SONG SONG (50% CAM 1 LAN DUONG | 50% CAM 2 BIEN BAO)
-        views_frame = tk.Frame(self.root, bg=self.BG_DARK, padx=12)
-        views_frame.pack(fill="both", expand=True, pady=(4, 6))
-        views_frame.columnconfigure(0, weight=1)
-        views_frame.columnconfigure(1, weight=1)
-        views_frame.rowconfigure(0, weight=1)
-
-        # MAN HINH TRAI: CAM 1 - LAN DUONG
-        left_card = tk.Frame(views_frame, bg=self.BG_PANEL, highlightbackground="#1f5c3a", highlightthickness=1)
-        left_card.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        left_hdr = tk.Frame(left_card, bg="#122620", height=30)
-        left_hdr.pack(fill="x")
-        self.lbl_cam1_title = tk.Label(
-            left_hdr, text="● CAM 1: QUAN SÁT LÀN ĐƯỜNG  |  Chưa chọn nguồn",
-            font=("Segoe UI", 9, "bold"), fg="#4ade80", bg="#122620", padx=10, pady=5
+        left_vp = tk.Frame(
+            left_card, bg=self.BG_SUBCARD, width=self.VIEW_W, height=self.VIEW_H,
+            highlightbackground=self.BORDER_DIM, highlightthickness=1,
         )
-        self.lbl_cam1_title.pack(side="left")
-        self.lbl_lane_badge = tk.Label(
-            left_hdr, text="Sáng: NORMAL  |  0.0 FPS",
-            font=("Segoe UI", 8, "bold"), fg="#fcd34d", bg="#122620", padx=10
-        )
-        self.lbl_lane_badge.pack(side="right")
-
+        left_vp.pack(padx=6, pady=6)
+        left_vp.pack_propagate(False)
         self.canvas_left = tk.Label(
-            left_card, bg="#070c14",
-            text="CAM 1 (Làn đường)\nChọn Camera / Video / Ảnh ở cụm trái phía trên",
-            fg=self.TEXT_MUTED, font=("Segoe UI", 10)
+            left_vp, bg=self.BG_SUBCARD,
+            text="Đang chờ tín hiệu CAM 1 (Làn đường)...",
+            fg=self.TXT_MUTED, font=("Segoe UI", 10),
         )
-        self.canvas_left.pack(fill="both", expand=True, padx=5, pady=5)
+        self.canvas_left.pack(fill="both", expand=True)
 
-        # MAN HINH PHAI: CAM 2 - BIEN BAO YOLO11n
-        right_card = tk.Frame(views_frame, bg=self.BG_PANEL, highlightbackground="#165a72", highlightthickness=1)
-        right_card.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
-        right_hdr = tk.Frame(right_card, bg="#122334", height=30)
-        right_hdr.pack(fill="x")
-        self.lbl_cam2_title = tk.Label(
-            right_hdr, text="● CAM 2: QUAN SÁT BIỂN BÁO (YOLO11n)  |  Chưa chọn nguồn",
-            font=("Segoe UI", 9, "bold"), fg="#38bdf8", bg="#122334", padx=10, pady=5
+        right_card = tk.Frame(
+            views_frame, bg=self.BG_CARD, width=self.CARD_W, height=self.CAM_CARD_H,
+            highlightbackground=self.BORDER_CARD, highlightthickness=1,
         )
-        self.lbl_cam2_title.pack(side="left")
+        right_card.pack(side="right")
+        right_card.pack_propagate(False)
+
+        right_hdr = tk.Frame(right_card, bg=self.BG_HEADER_BAR, height=32)
+        right_hdr.pack(fill="x")
+        right_hdr.pack_propagate(False)
+        tk.Label(
+            right_hdr, text="CAM 2 – BIỂN BÁO (YOLO11n)",
+            font=("Segoe UI", 9, "bold"), fg=self.TXT_WHITE, bg=self.BG_HEADER_BAR,
+        ).pack(side="left", padx=(10, 8))
+        self.lbl_cam2_src = tk.Label(
+            right_hdr, text="Chưa chọn",
+            font=("Segoe UI", 8, "bold"), fg=self.TXT_MUTED, bg=self.BG_SUBCARD,
+            padx=7, pady=1, highlightbackground=self.BORDER_SUB, highlightthickness=1,
+        )
+        self.lbl_cam2_src.pack(side="left", pady=5)
         self.lbl_sign_badge = tk.Label(
             right_hdr, text="YOLO11n  |  0.0 FPS",
-            font=("Segoe UI", 8, "bold"), fg="#4ade80", bg="#122334", padx=10
+            font=("Segoe UI", 8, "bold"), fg=self.COL_GREEN, bg=self.BG_HEADER_BAR,
         )
-        self.lbl_sign_badge.pack(side="right")
+        self.lbl_sign_badge.pack(side="right", padx=10)
 
+        tk.Frame(right_card, bg=self.BORDER_DIM, height=1).pack(fill="x")
+
+        right_tb = tk.Frame(right_card, bg=self.BG_HEADER_TOP, height=34)
+        right_tb.pack(fill="x")
+        right_tb.pack_propagate(False)
+
+        cb_scam = ttk.Combobox(
+            right_tb, textvariable=self.var_sign_cam,
+            values=["Cam 1", "Cam 0", "Cam 2", "Cam 3", "Chung Cam 1"],
+            width=11, state="readonly", style="Main.TCombobox", font=("Segoe UI", 8),
+        )
+        cb_scam.pack(side="left", padx=(8, 4), pady=5)
+        cb_scam.bind("<<ComboboxSelected>>", lambda e: self.action_open_sign_cam())
+
+        self._make_btn(right_tb, "Video", self.action_pick_sign_video, padx=7, pady=2).pack(side="left", padx=(0, 4), pady=4)
+        self._make_btn(right_tb, "Ảnh", self.action_pick_sign_image, padx=7, pady=2).pack(side="left", padx=(0, 8), pady=4)
+
+        ttk.Combobox(
+            right_tb, textvariable=self.var_sign_view,
+            values=["Kết quả YOLO11n", "4 Bước YOLO11n"],
+            width=15, state="readonly", style="Main.TCombobox", font=("Segoe UI", 8),
+        ).pack(side="left", pady=5)
+
+        tk.Checkbutton(
+            right_tb, text="Bật", variable=self.var_enable_sign,
+            bg=self.BG_HEADER_TOP, fg=self.TXT_SOFT, selectcolor=self.BG_PILL,
+            activebackground=self.BG_HEADER_TOP, activeforeground=self.TXT_WHITE,
+            font=("Segoe UI", 8), cursor="hand2",
+        ).pack(side="right", padx=(0, 6))
+
+        right_vp = tk.Frame(
+            right_card, bg=self.BG_SUBCARD, width=self.VIEW_W, height=self.VIEW_H,
+            highlightbackground=self.BORDER_DIM, highlightthickness=1,
+        )
+        right_vp.pack(padx=6, pady=6)
+        right_vp.pack_propagate(False)
         self.canvas_right = tk.Label(
-            right_card, bg="#070c14",
-            text="CAM 2 (Biển báo YOLO11n)\nChọn Camera / Video / Ảnh ở cụm phải phía trên",
-            fg=self.TEXT_MUTED, font=("Segoe UI", 10)
+            right_vp, bg=self.BG_SUBCARD,
+            text="Đang chờ tín hiệu CAM 2 (Biển báo YOLO11n)...",
+            fg=self.TXT_MUTED, font=("Segoe UI", 10),
         )
-        self.canvas_right.pack(fill="both", expand=True, padx=5, pady=5)
+        self.canvas_right.pack(fill="both", expand=True)
 
-        # 4. THANH TELEMETRY DIEU KHIEN XE
-        tele_card = tk.Frame(self.root, bg=self.BG_PANEL, padx=8, pady=5, highlightbackground=self.BG_BORDER, highlightthickness=1)
-        tele_card.pack(fill="x", padx=12, pady=(0, 6))
+        tele_card = tk.Frame(
+            self.root, bg=self.BG_CARD, height=54,
+            highlightbackground=self.BORDER_CARD, highlightthickness=1,
+        )
+        tele_card.pack(fill="x", padx=self.PAD_X, pady=(8, 0))
+        tele_card.pack_propagate(False)
 
-        self.lbl_lane_state = self._make_metric(tele_card, "Trạng thái làn (Cam 1):", "UNKNOWN", "#38bdf8")
-        self.lbl_offset = self._make_metric(tele_card, "Độ lệch tâm (e):", "+0.0 px (CÂN GIỮA)", "#4ade80")
-        self.lbl_corner = self._make_metric(tele_card, "Góc cua:", "ĐOẠN THẲNG", "#facc15")
-        self.lbl_esp_cmd = self._make_metric(tele_card, "Lệnh ESP32 giả lập:", "<0%, +0.00, NORM>", "#c084fc")
-        self.lbl_sign_override = self._make_metric(tele_card, "Ưu tiên Biển báo (Cam 2):", "Không có", "#fb923c")
+        tele_grid = tk.Frame(tele_card, bg=self.BG_CARD)
+        tele_grid.pack(fill="both", expand=True, padx=6, pady=5)
+        for col_i in range(5):
+            tele_grid.columnconfigure(col_i, weight=1, uniform="tele")
+        tele_grid.rowconfigure(0, weight=1)
 
-        # 5. BANG DANH SACH BIEN BAO PHAT HIEN (GON 4 DONG DE UU TIEN KHONG GIAN 2 MAN HINH CAM)
-        table_card = tk.Frame(self.root, bg=self.BG_PANEL, highlightbackground=self.BG_BORDER, highlightthickness=1)
-        table_card.pack(fill="x", padx=12, pady=(0, 6))
+        self.lbl_lane_state = self._make_metric(tele_grid, 0, "Làn đường", "UNKNOWN", self.COL_GREEN)
+        self.lbl_offset = self._make_metric(tele_grid, 1, "Lệch tâm", "+0.0 px (CAN GIUA)", self.COL_CYAN)
+        self.lbl_corner = self._make_metric(tele_grid, 2, "Góc cua", "ĐOẠN THẲNG", self.TXT_WHITE)
+        self.lbl_esp_cmd = self._make_metric(tele_grid, 3, "Lệnh ESP32", "<0%, +0.00, NORM>", self.COL_BLUE)
+        self.lbl_sign_override = self._make_metric(tele_grid, 4, "Ưu tiên biển báo", "Không có", self.COL_AMBER)
 
-        table_hdr = tk.Frame(table_card, bg="#152238")
+        table_card = tk.Frame(
+            self.root, bg=self.BG_CARD, height=152,
+            highlightbackground=self.BORDER_CARD, highlightthickness=1,
+        )
+        table_card.pack(fill="x", padx=self.PAD_X, pady=(8, 0))
+        table_card.pack_propagate(False)
+
+        table_hdr = tk.Frame(table_card, bg=self.BG_HEADER_BAR, height=28)
         table_hdr.pack(fill="x")
+        table_hdr.pack_propagate(False)
         self.lbl_table_title = tk.Label(
-            table_hdr, text="Biển báo phát hiện từ CAM 2 — YOLO11n (0)",
-            font=("Segoe UI", 9, "bold"), fg=self.TEXT_PRIMARY, bg="#152238", padx=10, pady=4
+            table_hdr, text="BIỂN BÁO PHÁT HIỆN (0)",
+            font=("Segoe UI", 9, "bold"), fg=self.TXT_WHITE, bg=self.BG_HEADER_BAR,
         )
-        self.lbl_table_title.pack(side="left")
+        self.lbl_table_title.pack(side="left", padx=10, pady=4)
 
-        tk.Checkbutton(table_hdr, text="Bật YOLO11n (Cam 2)", variable=self.var_enable_sign,
-                       bg="#152238", fg=self.TEXT_PRIMARY, selectcolor=self.BG_CARD,
-                       activebackground="#152238", activeforeground="white", font=("Segoe UI", 8)).pack(side="right", padx=8)
-        tk.Checkbutton(table_hdr, text="Bật Bám làn (Cam 1)", variable=self.var_enable_lane,
-                       bg="#152238", fg=self.TEXT_PRIMARY, selectcolor=self.BG_CARD,
-                       activebackground="#152238", activeforeground="white", font=("Segoe UI", 8)).pack(side="right", padx=8)
+        tk.Frame(table_card, bg=self.BORDER_DIM, height=1).pack(fill="x")
 
-        tree_wrap = tk.Frame(table_card, bg=self.BG_PANEL)
-        tree_wrap.pack(fill="x", padx=6, pady=5)
+        tree_wrap = tk.Frame(table_card, bg=self.BG_CARD)
+        tree_wrap.pack(fill="both", expand=True, padx=6, pady=5)
 
-        cols = ("idx", "vn", "cls", "action", "center", "bbox", "conf")
+        cols = ("idx", "vn", "cls", "action", "bbox", "conf")
         self.tree = ttk.Treeview(tree_wrap, columns=cols, show="headings", height=4, style="Sign.Treeview")
         headings = [
-            ("idx", "#", 40, "center"),
-            ("vn", "Biển báo", 150, "w"),
-            ("cls", "Mã lớp", 110, "center"),
-            ("action", "Hành động xe", 220, "w"),
-            ("center", "Tâm (x, y)", 120, "center"),
-            ("bbox", "Bounding Box (x, y, w, h)", 175, "center"),
-            ("conf", "Độ tin cậy", 105, "center"),
+            ("idx", "#", 45, "center"),
+            ("vn", "Biển báo", 220, "w"),
+            ("cls", "Mã lớp", 130, "center"),
+            ("action", "Hành động xe", 360, "w"),
+            ("bbox", "Vùng (x, y, w, h)", 180, "center"),
+            ("conf", "Độ tin cậy", 110, "center"),
         ]
         for cid, ctext, cwidth, calign in headings:
             self.tree.heading(cid, text=ctext)
             self.tree.column(cid, width=cwidth, anchor=calign, stretch=(cid in ("vn", "action")))
 
-        sb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
+        sb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview, style="Main.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=sb.set)
-        self.tree.pack(side="left", fill="x", expand=True)
+        self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
 
-        # 6. STATUS BAR DUOI CUNG
-        status_bar = tk.Frame(self.root, bg="#070c14", height=24)
+        status_bar = tk.Frame(self.root, bg=self.BG_HEADER_TOP, height=32)
         status_bar.pack(fill="x", side="bottom")
-        self.lbl_status_left = tk.Label(
-            status_bar, text="● Sẵn sàng — Chọn nguồn độc lập cho CAM 1 (Làn đường) và CAM 2 (Biển báo)",
-            fg="#4ade80", bg="#070c14", font=("Segoe UI", 8), padx=10, pady=3
-        )
-        self.lbl_status_left.pack(side="left")
-        self.lbl_status_right = tk.Label(
-            status_bar, text="0 biển báo | 0 ms",
-            fg=self.TEXT_MUTED, bg="#070c14", font=("Segoe UI", 8), padx=10, pady=3
-        )
-        self.lbl_status_right.pack(side="right")
+        status_bar.pack_propagate(False)
+        tk.Frame(status_bar, bg=self.BORDER_DIM, height=1).pack(fill="x")
 
-    def _make_metric(self, parent, title, val, color):
-        box = tk.Frame(parent, bg=self.BG_CARD, padx=8, pady=4, highlightbackground=self.BG_BORDER, highlightthickness=1)
-        box.pack(side="left", fill="x", expand=True, padx=3)
-        tk.Label(box, text=title, font=("Segoe UI", 8), fg=self.TEXT_MUTED, bg=self.BG_CARD).pack(anchor="w")
-        lbl = tk.Label(box, text=val, font=("Segoe UI", 9, "bold"), fg=color, bg=self.BG_CARD)
+        status_inner = tk.Frame(status_bar, bg=self.BG_HEADER_TOP)
+        status_inner.pack(fill="both", expand=True, padx=self.PAD_X)
+
+        self.lbl_status_left = tk.Label(
+            status_inner, text="● Sẵn sàng",
+            fg=self.COL_GREEN, bg=self.BG_HEADER_TOP, font=("Segoe UI", 8, "bold"),
+        )
+        self.lbl_status_left.pack(side="left", pady=5)
+        self.lbl_status_right = tk.Label(
+            status_inner, text="[Space] Tạm dừng   |   [+/-] FOV   |   [Esc] Thoát   |   0 ms",
+            fg=self.TXT_SOFT, bg=self.BG_HEADER_TOP, font=("Segoe UI", 8),
+        )
+        self.lbl_status_right.pack(side="right", pady=5)
+
+    def _make_metric(self, parent, col_idx, title, val, color):
+        box = tk.Frame(
+            parent, bg=self.BG_SUBCARD, padx=9, pady=3,
+            highlightbackground=self.BORDER_SUB, highlightthickness=1,
+        )
+        padx = (0, 6) if col_idx < 4 else (0, 0)
+        box.grid(row=0, column=col_idx, sticky="nsew", padx=padx)
+        tk.Label(box, text=title, font=("Segoe UI", 8), fg=self.TXT_MUTED, bg=self.BG_SUBCARD).pack(anchor="w")
+        lbl = tk.Label(box, text=val, font=("Segoe UI", 9, "bold"), fg=color, bg=self.BG_SUBCARD)
         lbl.pack(anchor="w")
         return lbl
+
+    def _set_source_pill(self, pill_label, text, active=True):
+        if active:
+            pill_label.config(
+                text=text[:24],
+                fg=self.COL_BLUE,
+                bg=self.COL_TINT_BG,
+                highlightbackground=self.COL_TINT_BORDER,
+            )
+        else:
+            pill_label.config(
+                text=text[:24],
+                fg=self.TXT_MUTED,
+                bg=self.BG_SUBCARD,
+                highlightbackground=self.BORDER_SUB,
+            )
 
     def _bind_shortcuts(self):
         self.root.bind("<space>", lambda e: self.action_toggle_pause())
         self.root.bind("<Escape>", lambda e: self._on_close())
+        self.root.bind("-", lambda e: self._adjust_fov(-10))
+        self.root.bind("_", lambda e: self._adjust_fov(-10))
+        self.root.bind("+", lambda e: self._adjust_fov(10))
+        self.root.bind("=", lambda e: self._adjust_fov(10))
 
     def _init_startup_sources(self):
         if self.args.lane_cam >= 0 or self.args.sign_cam >= 0:
@@ -574,13 +759,12 @@ class XeTuHanhTestApp:
             self.var_sign_cam.set("Chung Cam 1")
             self.open_sign_source("SHARED")
         else:
-            # Mo san anh mau cho Cam 2 (Bien bao) neu co de giao dien hien thi truc quan ngay
-            png_dir = os.path.join(P2_DIR, "data", "DuLieuBienBaoPNG")
-            default_img = os.path.join(png_dir, "ReTrai.png")
-            if os.path.exists(default_img):
-                self.open_sign_source(default_img)
-
-    # --- MO NGUON DOC LAP CHO CAM 1 (LAN DUONG) & CAM 2 (BIEN BAO) ---
+            for cand in (
+                os.path.join(P2_DIR, "data", "DuLieuBienBaoPNG", "ReTrai.png"),
+            ):
+                if os.path.exists(cand):
+                    self.open_sign_source(cand)
+                    break
 
     def _close_lane_source(self):
         if self.lane_cap is not None:
@@ -607,18 +791,19 @@ class XeTuHanhTestApp:
         if isinstance(src, int):
             cap = _open_camera_capture(src, (self.wT, self.hT))
             if cap is None:
-                self.lbl_status_left.config(text=f"● Lỗi CAM 1: Không mở được Camera {src}", fg="#f87171")
+                self._set_source_pill(self.lbl_cam1_src, "Lỗi kết nối", False)
+                self.lbl_status_left.config(text=f"● Lỗi CAM 1: Không mở được Camera {src}", fg=self.COL_RED)
                 return False
             self.lane_cap = cap
             self.lane_is_static = False
             self.lane_source = src
-            self.lbl_cam1_title.config(text=f"● CAM 1: QUAN SÁT LÀN ĐƯỜNG  |  Camera {src} (LIVE)")
-            self.lbl_status_left.config(text=f"● Đã mở CAM 1 (Làn đường): Camera {src}", fg="#4ade80")
+            self._set_source_pill(self.lbl_cam1_src, f"Camera {src}", True)
+            self.lbl_status_left.config(text=f"● Đã mở CAM 1: Camera {src}", fg=self.COL_GREEN)
             return True
 
         src = str(src).strip('"\'')
         if not os.path.exists(src):
-            self.lbl_status_left.config(text=f"● Không tìm thấy file cho CAM 1: {src}", fg="#f87171")
+            self.lbl_status_left.config(text=f"● Không tìm thấy file CAM 1: {src}", fg=self.COL_RED)
             return False
 
         if src.lower().endswith(IMAGE_EXTENSIONS):
@@ -628,12 +813,13 @@ class XeTuHanhTestApp:
             self.lane_static_raw = img
             self.lane_is_static = True
             self.lane_source = src
-            self.lbl_cam1_title.config(text=f"● CAM 1: QUAN SÁT LÀN ĐƯỜNG  |  Ảnh: {os.path.basename(src)}")
+            self._set_source_pill(self.lbl_cam1_src, os.path.basename(src), True)
+            self.lbl_status_left.config(text=f"● Đã mở ảnh CAM 1: {os.path.basename(src)}", fg=self.COL_GREEN)
             return True
 
         cap = cv2.VideoCapture(src)
         if not cap.isOpened():
-            self.lbl_status_left.config(text=f"● Không mở được video cho CAM 1: {os.path.basename(src)}", fg="#f87171")
+            self.lbl_status_left.config(text=f"● Không mở được video CAM 1: {os.path.basename(src)}", fg=self.COL_RED)
             return False
         self.lane_cap = cap
         self.lane_is_static = False
@@ -641,7 +827,8 @@ class XeTuHanhTestApp:
         is_hw = is_highway_source(src)
         self.var_preset.set("Đường cao tốc" if is_hw else "Robot sân nhà")
         self.action_change_preset()
-        self.lbl_cam1_title.config(text=f"● CAM 1: QUAN SÁT LÀN ĐƯỜNG  |  Video: {os.path.basename(src)}")
+        self._set_source_pill(self.lbl_cam1_src, os.path.basename(src), True)
+        self.lbl_status_left.config(text=f"● Đã mở video CAM 1: {os.path.basename(src)}", fg=self.COL_GREEN)
         return True
 
     def open_sign_source(self, src):
@@ -650,7 +837,6 @@ class XeTuHanhTestApp:
             self.sign_tracker.reset()
         self.latest_detected_signs = []
         self.latest_sign_debug = {}
-        self.last_terminal_sign_sig = None
         self.last_table_sig = None
         self.sign_frame = None
         self.sign_static_raw = None
@@ -660,8 +846,8 @@ class XeTuHanhTestApp:
             self.sign_share_lane = True
             self.sign_is_static = False
             self.sign_source = "SHARED"
-            self.lbl_cam2_title.config(text="● CAM 2: QUAN SÁT BIỂN BÁO (YOLO11n)  |  Dùng chung CAM 1")
-            self.lbl_status_left.config(text="● CAM 2 đang dùng chung khung hình từ CAM 1", fg="#fcd34d")
+            self._set_source_pill(self.lbl_cam2_src, "Chung CAM 1", True)
+            self.lbl_status_left.config(text="● CAM 2 đang dùng chung khung hình từ CAM 1", fg=self.COL_AMBER)
             return True
 
         if isinstance(src, int):
@@ -669,22 +855,23 @@ class XeTuHanhTestApp:
                 self.sign_share_lane = True
                 self.sign_source = "SHARED"
                 self.var_sign_cam.set("Chung Cam 1")
-                self.lbl_cam2_title.config(text=f"● CAM 2: QUAN SÁT BIỂN BÁO (YOLO11n)  |  Chung Camera {src}")
+                self._set_source_pill(self.lbl_cam2_src, f"Chung Camera {src}", True)
                 return True
             cap = _open_camera_capture(src, (self.sign_wT, self.sign_hT))
             if cap is None:
-                self.lbl_status_left.config(text=f"● Lỗi CAM 2: Không mở được Camera {src}", fg="#f87171")
+                self._set_source_pill(self.lbl_cam2_src, "Lỗi kết nối", False)
+                self.lbl_status_left.config(text=f"● Lỗi CAM 2: Không mở được Camera {src}", fg=self.COL_RED)
                 return False
             self.sign_cap = cap
             self.sign_is_static = False
             self.sign_source = src
-            self.lbl_cam2_title.config(text=f"● CAM 2: QUAN SÁT BIỂN BÁO (YOLO11n)  |  Camera {src} (LIVE)")
-            self.lbl_status_left.config(text=f"● Đã mở CAM 2 (Biển báo): Camera {src}", fg="#38bdf8")
+            self._set_source_pill(self.lbl_cam2_src, f"Camera {src}", True)
+            self.lbl_status_left.config(text=f"● Đã mở CAM 2: Camera {src}", fg=self.COL_CYAN)
             return True
 
         src = str(src).strip('"\'')
         if not os.path.exists(src):
-            self.lbl_status_left.config(text=f"● Không tìm thấy file cho CAM 2: {src}", fg="#f87171")
+            self.lbl_status_left.config(text=f"● Không tìm thấy file CAM 2: {src}", fg=self.COL_RED)
             return False
 
         if src.lower().endswith(IMAGE_EXTENSIONS):
@@ -694,20 +881,20 @@ class XeTuHanhTestApp:
             self.sign_static_raw = img
             self.sign_is_static = True
             self.sign_source = src
-            self.lbl_cam2_title.config(text=f"● CAM 2: QUAN SÁT BIỂN BÁO (YOLO11n)  |  Ảnh: {os.path.basename(src)}")
+            self._set_source_pill(self.lbl_cam2_src, os.path.basename(src), True)
+            self.lbl_status_left.config(text=f"● Đã mở ảnh CAM 2: {os.path.basename(src)}", fg=self.COL_CYAN)
             return True
 
         cap = cv2.VideoCapture(src)
         if not cap.isOpened():
-            self.lbl_status_left.config(text=f"● Không mở được video cho CAM 2: {os.path.basename(src)}", fg="#f87171")
+            self.lbl_status_left.config(text=f"● Không mở được video CAM 2: {os.path.basename(src)}", fg=self.COL_RED)
             return False
         self.sign_cap = cap
         self.sign_is_static = False
         self.sign_source = src
-        self.lbl_cam2_title.config(text=f"● CAM 2: QUAN SÁT BIỂN BÁO (YOLO11n)  |  Video: {os.path.basename(src)}")
+        self._set_source_pill(self.lbl_cam2_src, os.path.basename(src), True)
+        self.lbl_status_left.config(text=f"● Đã mở video CAM 2: {os.path.basename(src)}", fg=self.COL_CYAN)
         return True
-
-    # --- CAC HANH DONG NUT BAM ---
 
     @staticmethod
     def _parse_cam_combo(text, default_idx=0):
@@ -737,9 +924,8 @@ class XeTuHanhTestApp:
             self.open_sign_source("SHARED")
 
     def action_swap_cameras(self):
-        """Hoan doi ngay lap tuc 2 luong Camera (CAM 1 <-> CAM 2)."""
         if self.sign_share_lane:
-            self.lbl_status_left.config(text="● Đang dùng chung 1 camera nên không thể hoán đổi", fg="#fcd34d")
+            self.lbl_status_left.config(text="● Đang dùng chung 1 camera nên không thể hoán đổi", fg=self.COL_AMBER)
             return
         self.lane_cap, self.sign_cap = self.sign_cap, self.lane_cap
         self.lane_source, self.sign_source = self.sign_source, self.lane_source
@@ -749,52 +935,53 @@ class XeTuHanhTestApp:
         if self.sign_tracker is not None:
             self.sign_tracker.reset()
 
-        l_txt = f"Camera {self.lane_source} (LIVE)" if isinstance(self.lane_source, int) else (os.path.basename(str(self.lane_source)) if self.lane_source else "Chưa chọn")
-        s_txt = f"Camera {self.sign_source} (LIVE)" if isinstance(self.sign_source, int) else (os.path.basename(str(self.sign_source)) if self.sign_source else "Chưa chọn")
+        l_txt = f"Camera {self.lane_source}" if isinstance(self.lane_source, int) else (os.path.basename(str(self.lane_source)) if self.lane_source else "Chưa chọn")
+        s_txt = f"Camera {self.sign_source}" if isinstance(self.sign_source, int) else (os.path.basename(str(self.sign_source)) if self.sign_source else "Chưa chọn")
         if isinstance(self.lane_source, int):
             self.var_lane_cam.set(f"Cam {self.lane_source}")
         if isinstance(self.sign_source, int):
             self.var_sign_cam.set(f"Cam {self.sign_source}")
-        self.lbl_cam1_title.config(text=f"● CAM 1: QUAN SÁT LÀN ĐƯỜNG  |  {l_txt}")
-        self.lbl_cam2_title.config(text=f"● CAM 2: QUAN SÁT BIỂN BÁO (YOLO11n)  |  {s_txt}")
-        self.lbl_status_left.config(text="● Đã hoán đổi nguồn CAM 1 ↔ CAM 2", fg="#4ade80")
+        self._set_source_pill(self.lbl_cam1_src, l_txt, self.lane_source is not None)
+        self._set_source_pill(self.lbl_cam2_src, s_txt, self.sign_source is not None)
+        self.lbl_status_left.config(text="● Đã hoán đổi nguồn CAM 1 ↔ CAM 2", fg=self.COL_GREEN)
 
     def action_pick_lane_image(self):
         init_d = IMG_DIR if os.path.isdir(IMG_DIR) else BASE_DIR
-        f = filedialog.askopenfilename(title="Chọn ảnh cho CAM 1 (Làn đường)", initialdir=init_d,
-                                       filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp"), ("All files", "*.*")])
+        f = filedialog.askopenfilename(
+            title="Chọn ảnh cho CAM 1 (Làn đường)", initialdir=init_d,
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp"), ("All files", "*.*")],
+        )
         if f:
             self.open_lane_source(f)
 
     def action_pick_lane_video(self):
         init_d = VID_DIR if os.path.isdir(VID_DIR) else BASE_DIR
-        f = filedialog.askopenfilename(title="Chọn video cho CAM 1 (Làn đường)", initialdir=init_d,
-                                       filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv"), ("All files", "*.*")])
+        f = filedialog.askopenfilename(
+            title="Chọn video cho CAM 1 (Làn đường)", initialdir=init_d,
+            filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv"), ("All files", "*.*")],
+        )
         if f:
             self.open_lane_source(f)
 
     def action_pick_sign_image(self):
-        init_d = os.path.join(P2_DIR, "data") if os.path.isdir(os.path.join(P2_DIR, "data")) else BASE_DIR
-        f = filedialog.askopenfilename(title="Chọn ảnh cho CAM 2 (Biển báo)", initialdir=init_d,
-                                       filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp"), ("All files", "*.*")])
+        test_d = os.path.join(P2_DIR, "data", "test")
+        data_d = os.path.join(P2_DIR, "data")
+        init_d = test_d if os.path.isdir(test_d) else (data_d if os.path.isdir(data_d) else BASE_DIR)
+        f = filedialog.askopenfilename(
+            title="Chọn ảnh cho CAM 2 (Biển báo)", initialdir=init_d,
+            filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp"), ("All files", "*.*")],
+        )
         if f:
             self.open_sign_source(f)
 
     def action_pick_sign_video(self):
         init_d = VID_DIR if os.path.isdir(VID_DIR) else BASE_DIR
-        f = filedialog.askopenfilename(title="Chọn video cho CAM 2 (Biển báo)", initialdir=init_d,
-                                       filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv"), ("All files", "*.*")])
+        f = filedialog.askopenfilename(
+            title="Chọn video cho CAM 2 (Biển báo)", initialdir=init_d,
+            filetypes=[("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv"), ("All files", "*.*")],
+        )
         if f:
             self.open_sign_source(f)
-
-    def action_open_sample_sign(self):
-        cand_21 = os.path.join(P2_DIR, "data", "DuLieuBienBaoPNG", "21_BienBaoGiaoThong.png")
-        cand_png = os.path.join(P2_DIR, "data", "DuLieuBienBaoPNG", "ReTrai.png")
-        for target in (cand_21, cand_png):
-            if os.path.exists(target):
-                self.open_sign_source(target)
-                return
-        self.action_pick_sign_image()
 
     def action_save_snapshot(self):
         imgs = [im for im in (self.last_lane_vis, self.last_sign_vis) if im is not None]
@@ -810,11 +997,11 @@ class XeTuHanhTestApp:
         out_path = filedialog.asksaveasfilename(
             title="Lưu ảnh quan sát 2 Camera", defaultextension=".png",
             initialfile="quan_sat_2_camera.png",
-            filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg")]
+            filetypes=[("PNG", "*.png"), ("JPEG", "*.jpg")],
         )
         if out_path:
             cv2.imwrite(out_path, merged)
-            self.lbl_status_left.config(text=f"● Đã lưu ảnh: {os.path.basename(out_path)}", fg="#4ade80")
+            self.lbl_status_left.config(text=f"● Đã lưu ảnh: {os.path.basename(out_path)}", fg=self.COL_GREEN)
 
     def action_change_preset(self):
         is_hw = self.var_preset.get() == "Đường cao tốc"
@@ -824,9 +1011,10 @@ class XeTuHanhTestApp:
 
     def action_toggle_pause(self):
         self.paused = not self.paused
-        self.btn_pause.config(
-            text="▶ Tiếp tục" if self.paused else "⏸ Tạm dừng",
-            bg=self.ACCENT_AMBER if self.paused else self.ACCENT_BLUE
+        self._set_btn_style(
+            self.btn_pause,
+            tinted=self.paused,
+            text="Tiếp tục" if self.paused else "Tạm dừng",
         )
 
     def action_reset(self):
@@ -835,15 +1023,16 @@ class XeTuHanhTestApp:
             self.sign_tracker.reset()
         self.latest_detected_signs = []
         self.latest_sign_debug = {}
-        self.last_terminal_sign_sig = None
         self.last_table_sig = None
         self._update_sign_table([])
 
     def _adjust_fov(self, delta):
         self.cam_fov_pct = max(40, min(100, self.cam_fov_pct + delta))
-        self.lbl_fov.config(text=f"FOV:{self.cam_fov_pct}%")
+        self.btn_fov.config(text=f"FOV: {self.cam_fov_pct}%")
 
-    # --- XU LY & HIEN THI ---
+    def _reset_fov(self):
+        self.cam_fov_pct = 100
+        self.btn_fov.config(text="FOV: 100%")
 
     def _get_roi_and_hsv(self):
         wT, hT = self.wT, self.hT
@@ -878,26 +1067,28 @@ class XeTuHanhTestApp:
         self.last_table_sig = sig
         for item in self.tree.get_children():
             self.tree.delete(item)
-        self.lbl_table_title.config(text=f"Biển báo phát hiện từ CAM 2 — YOLO11n ({len(dets)})")
+        self.lbl_table_title.config(text=f"BIỂN BÁO PHÁT HIỆN ({len(dets)})")
         for idx, (cls_name, bx, by, bw, bh, score) in enumerate(dets, start=1):
             info = SIGN_INFO.get(cls_name, {"vn": cls_name, "action": "N/A"})
-            cx, cy = int(bx + bw // 2), int(by + bh // 2)
             self.tree.insert("", "end", values=(
                 idx, info.get("vn", cls_name), cls_name, info.get("action", "N/A"),
-                f"({cx}, {cy})", f"({bx}, {by}, {bw}, {bh})", f"{score * 100:.1f}%"
+                f"({bx}, {by}, {bw}, {bh})", f"{score * 100:.1f}%",
             ))
 
     def _render_bgr_to_label(self, label_widget, bgr_img):
         if bgr_img is None or bgr_img.size == 0:
             return None
-        w = max(320, label_widget.winfo_width() - 6)
-        h = max(220, label_widget.winfo_height() - 6)
+        tw, th = self.VIEW_W - 2, self.VIEW_H - 2
         ih, iw = bgr_img.shape[:2]
-        scale = min(w / float(iw), h / float(ih))
-        nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+        scale = min(tw / float(iw), th / float(ih))
+        nw, nh = max(1, int(round(iw * scale))), max(1, int(round(ih * scale)))
         resized = cv2.resize(bgr_img, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-        photo = ImageTk.PhotoImage(image=Image.fromarray(rgb))
+        canvas = np.full((th, tw, 3), self.SUBCARD_RGB, dtype=np.uint8)
+        ox = (tw - nw) // 2
+        oy = (th - nh) // 2
+        canvas[oy:oy + nh, ox:ox + nw] = rgb
+        photo = ImageTk.PhotoImage(image=Image.fromarray(canvas))
         label_widget.config(image=photo, text="")
         return photo
 
@@ -918,12 +1109,10 @@ class XeTuHanhTestApp:
     def _update_loop(self):
         t_loop_start = time.perf_counter()
 
-        # 1. Doc frame CAM 1 (Lan duong)
         new_lane = self._read_next_frame(self.lane_cap, self.lane_is_static, self.lane_static_raw, (self.wT, self.hT))
         if new_lane is not None:
             self.lane_frame = cv2.resize(new_lane, (self.wT, self.hT)) if (new_lane.shape[1] != self.wT or new_lane.shape[0] != self.hT) else new_lane
 
-        # 2. Doc frame CAM 2 (Bien bao YOLO11n) doc lap (hoac dung chung CAM 1)
         if self.sign_share_lane:
             if self.lane_frame is not None:
                 self.sign_frame = self.lane_frame.copy()
@@ -932,7 +1121,6 @@ class XeTuHanhTestApp:
             if new_sign is not None:
                 self.sign_frame = new_sign
 
-        # 3. Xu ly & hien thi MAN HINH TRAI (CAM 1: LAN DUONG)
         curve_val = 0.0
         det_lane = {}
         if self.lane_frame is not None:
@@ -972,18 +1160,17 @@ class XeTuHanhTestApp:
                 c_dir = corner.get("direction", "UNKNOWN")
                 c_zone = corner.get("distance_zone", "NONE")
 
-                self.lbl_lane_badge.config(text=f"Sáng: {light_mode}  |  {self.lane_fps:.1f} FPS")
+                self.lbl_lane_badge.config(text=f"{light_mode}  |  {self.lane_fps:.1f} FPS", fg=self.COL_CYAN)
                 self.lbl_lane_state.config(text=lane_state)
                 self.lbl_offset.config(text=f"{e_px:+.1f} px ({e_dir})")
                 self.lbl_corner.config(text=f"{c_dir} ({c_zone})" if c_dir != "UNKNOWN" else "ĐOẠN THẲNG")
             else:
                 left_bgr = self.lane_frame
-                self.lbl_lane_badge.config(text="Bám làn: TẮT")
+                self.lbl_lane_badge.config(text="TẮT", fg=self.TXT_MUTED)
 
             self.last_lane_vis = left_bgr
             self._photo_left = self._render_bgr_to_label(self.canvas_left, left_bgr)
 
-        # 4. Xu ly & hien thi MAN HINH PHAI (CAM 2: BIEN BAO YOLO11n)
         if self.sign_frame is not None:
             if not self.var_enable_sign.get():
                 self.latest_detected_signs = []
@@ -1008,15 +1195,13 @@ class XeTuHanhTestApp:
             detected_signs = self.latest_detected_signs
             sign_vis = self.sign_frame.copy()
             if SIGN_MODULE_AVAILABLE and self.var_enable_sign.get():
-                # Ve nhe cac ung vien duoi nguong
                 for prev in self.latest_sign_debug.get("yolo_previews", []):
                     if not prev.get("accepted", False):
                         bx, by, bw, bh = prev["box"]
-                        cv2.rectangle(sign_vis, (bx, by), (bx + bw, by + bh), (0, 155, 255), 1, cv2.LINE_AA)
-                # Ve dam cac bien bao da xac nhan
+                        cv2.rectangle(sign_vis, (bx, by), (bx + bw, by + bh), BGR_AMBER, 1, cv2.LINE_AA)
                 for cls_name, bx, by, bw, bh, score in detected_signs:
-                    info = SIGN_INFO.get(cls_name, {"vn": cls_name, "color": (0, 255, 0)})
-                    col = info.get("color", (0, 255, 0))
+                    info = SIGN_INFO.get(cls_name, {"vn": cls_name, "color": BGR_GREEN})
+                    col = info.get("color", BGR_GREEN)
                     label = f"{info.get('vn', cls_name)} ({score:.0%})"
                     thick = max(2, sign_vis.shape[1] // 450)
                     fscale = max(0.48, sign_vis.shape[1] / 1100.0)
@@ -1024,8 +1209,8 @@ class XeTuHanhTestApp:
                     (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fscale, thick)
                     tx = max(4, min(bx, sign_vis.shape[1] - tw - 10))
                     ty = max(th + 10, by - 6)
-                    cv2.rectangle(sign_vis, (tx - 2, ty - th - 6), (tx + tw + 6, ty + 3), (18, 22, 28), -1)
-                    cv2.putText(sign_vis, label, (tx + 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, fscale, (0, 255, 255), thick, cv2.LINE_AA)
+                    cv2.rectangle(sign_vis, (tx - 2, ty - th - 6), (tx + tw + 6, ty + 3), BGR_SUBCARD, -1)
+                    cv2.putText(sign_vis, label, (tx + 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, fscale, BGR_AMBER, thick, cv2.LINE_AA)
 
             if self.var_sign_view.get() == "4 Bước YOLO11n":
                 right_bgr = build_sign_steps_grid(self.sign_frame, detected_signs, self.latest_sign_debug, self.sign_wT, self.sign_hT)
@@ -1035,11 +1220,13 @@ class XeTuHanhTestApp:
             self.last_sign_vis = right_bgr
             self._photo_right = self._render_bgr_to_label(self.canvas_right, right_bgr)
 
-            mdl_txt = "YOLO11n" if self.sign_model is not None else "Chưa có model"
-            self.lbl_sign_badge.config(text=f"{mdl_txt}  |  {len(detected_signs)} biển  |  {self.sign_fps:.1f} FPS")
+            if not self.var_enable_sign.get():
+                self.lbl_sign_badge.config(text="TẮT", fg=self.TXT_MUTED)
+            else:
+                mdl_txt = "YOLO11n" if self.sign_model is not None else "Chưa có model"
+                self.lbl_sign_badge.config(text=f"{mdl_txt}  |  {self.sign_fps:.1f} FPS", fg=self.COL_GREEN)
             self._update_sign_table(detected_signs)
 
-        # 5. Cap nhat lenh ESP32 gia lap tong hop tu ca 2 Camera
         if MOTOR_LOGIC_AVAILABLE:
             spd, err, cmd, sign_ov = decide_pi_to_esp32_command(
                 curve_val, self.latest_detected_signs, SIGN_INFO, lane_info=det_lane
@@ -1048,7 +1235,9 @@ class XeTuHanhTestApp:
             self.lbl_sign_override.config(text=sign_ov if sign_ov else "Không có")
 
         self.last_proc_ms = (time.perf_counter() - t_loop_start) * 1000.0
-        self.lbl_status_right.config(text=f"{len(self.latest_detected_signs)} biển báo | {self.last_proc_ms:.0f} ms")
+        self.lbl_status_right.config(
+            text=f"[Space] Tạm dừng   |   [+/-] FOV   |   [Esc] Thoát   |   {self.last_proc_ms:.0f} ms"
+        )
 
         delay_ms = 55 if (self.paused or (self.lane_is_static and self.sign_is_static)) else 16
         self.root.after(delay_ms, self._update_loop)
@@ -1063,10 +1252,10 @@ class XeTuHanhTestApp:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Tram Quan Sat 2 Camera — Lan duong & Bien bao YOLO11n")
+    parser = argparse.ArgumentParser(description="Xe Tu Hanh — Kiem Thu 2 Camera")
     parser.add_argument("--lane-cam", type=int, default=-1, help="Index webcam cho CAM 1 (Lan duong)")
     parser.add_argument("--sign-cam", type=int, default=-1, help="Index webcam cho CAM 2 (Bien bao YOLO11n)")
-    parser.add_argument("--cam", "-c", type=int, default=-1, help="Mo 1 webcam dung chung (tuong thich cu)")
+    parser.add_argument("--cam", "-c", type=int, default=-1, help="Mo 1 webcam dung chung")
     parser.add_argument("--video", "-v", type=str, default="", help="Duong dan video/anh")
     parser.add_argument("video_direct", nargs="?", default="", help="Duong dan video/anh truc tiep")
     parser.add_argument("--width", type=int, default=480, help="Chieu rong frame Lan duong (default: 480)")
