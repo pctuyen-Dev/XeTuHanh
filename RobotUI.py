@@ -1,398 +1,767 @@
+import os
 import time
+import unicodedata
 import cv2
 import numpy as np
 
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    _PIL_AVAILABLE = True
+except Exception:
+    _PIL_AVAILABLE = False
+
+# Bang mau Dark phoi mau hai hoa (Obsidian Graphite + Cobalt + Emerald - dinh dang BGR)
+BG_CANVAS     = (21, 17, 15)      # #0f1115 - Nen chinh toi sau
+BG_HEADER_TOP = (30, 24, 21)      # #15181e - Thanh tieu de tren cung
+BG_CARD       = (33, 27, 24)      # #181b21 - Nen the noi dung chinh
+BG_SUBCARD    = (26, 21, 18)      # #12151a - Khung phu ben trong
+BG_HEADER_BAR = (42, 34, 30)      # #1e222a - Dai tieu de moi the
+BG_PILL       = (47, 38, 33)      # #21262f - Nut bam mac dinh
+BG_PILL_HOVER = (61, 49, 43)      # #2b313d - Nut bam khi di chuot
+BG_TRACK      = (50, 40, 35)      # #232832 - Nen thanh tien trinh
+
+BORDER_GLOW   = (38, 32, 28)      # Khong dung vien neon
+BORDER_CARD   = (63, 52, 45)      # #2d343f - Vien the chinh
+BORDER_SUB    = (52, 42, 37)      # #252a34 - Vien khung phu
+BORDER_BTN    = (78, 64, 56)      # #38404e - Vien nut bam
+BORDER_DIM    = (48, 39, 34)      # #222730 - Duong ke chia manh
+
+# He mau nhan phoi hop (Cobalt diu + Emerald + Amber + Crimson)
+COL_ACCENT      = (246, 130, 59)  # #3b82f6 - Xanh cobalt nhan chinh
+COL_CYAN        = (250, 165, 96)  # #60a5fa - Xanh thep sang de doc thong so
+COL_BLUE        = (253, 197, 147) # #93c5fd - Xanh nhat cho chu nut nhan
+COL_TINT_BG     = (56, 37, 24)    # #182538 - Nen nut nhan xanh dam
+COL_TINT_HOVER  = (74, 49, 31)    # #1f314a - Nen nut nhan khi di chuot
+COL_TINT_BORDER = (120, 76, 45)   # #2d4c78 - Vien nut nhan xanh dam
+
+COL_GREEN       = (153, 211, 52)  # #34d399 - Xanh ngoc trang thai tot
+COL_GREEN_DARK  = (74, 163, 22)   # #16a34a - Xanh la dam (dau thanh toc do)
+COL_LIME        = (153, 211, 52)  # #34d399 - Dong bo mau xanh ngoc
+COL_AMBER       = (65, 184, 245)  # #f5b841 - Vang am canh bao / bien bao
+COL_AMBER_DARK  = (18, 128, 212)  # #d48012 - Vang dam (dau thanh toc do thap)
+COL_ORANGE      = (60, 132, 240)  # #f0843c - Cam lech goc lai cao
+COL_RED         = (113, 113, 248) # #f87171 - Do mem de doc tren nen toi
+COL_RED_DARK    = (55, 55, 180)   # #b43737 - Do dam (dau thanh khi dung)
+COL_PURPLE      = (250, 165, 96)  # Dong bo ve xanh thep (khong dung tim neon)
+
+# Mau nut Tat he thong (Do tham noi bat co kiem soat)
+BTN_QUIT_BG       = (43, 43, 181) # #b52b2b
+BTN_QUIT_BG_HOVER = (52, 52, 207) # #cf3434
+BTN_QUIT_BORDER   = (85, 85, 224) # #e05555
+
+TXT_WHITE     = (242, 236, 232)   # #e8ecf2 - Chu chinh sang ro
+TXT_SOFT      = (193, 178, 168)   # #a8b2c1 - Chu phu
+TXT_MUTED     = (135, 119, 110)   # #6e7787 - Nhan mo
+
+
+def _strip_accents(text: str) -> str:
+    """Chuyen tieng Viet co dau -> khong dau cho che do fallback OpenCV."""
+    s = text.replace("đ", "d").replace("Đ", "D").replace("–", "-").replace("—", "-")
+    nfkd = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+
+
+class _TextEngine:
+    """Ve chu tieng Viet sac net bang Pillow + cache alpha mask (fallback OpenCV)."""
+
+    def __init__(self):
+        self._use_pil = False
+        self._fonts = {}
+        self._cache = {}
+        self._max_cache = 512
+        self._reg_path = None
+        self._bold_path = None
+
+        if _PIL_AVAILABLE:
+            self._reg_path, self._bold_path = self._find_fonts()
+            if self._reg_path:
+                self._use_pil = True
+
+    @staticmethod
+    def _find_fonts():
+        candidates = [
+            # Windows
+            (r"C:\Windows\Fonts\segoeui.ttf", r"C:\Windows\Fonts\segoeuib.ttf"),
+            (r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\arialbd.ttf"),
+            (r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\tahomabd.ttf"),
+            # Linux / Raspberry Pi
+            ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+             "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+            ("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+             "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"),
+        ]
+        for reg, bold in candidates:
+            if os.path.isfile(reg):
+                return reg, bold if os.path.isfile(bold) else reg
+        return None, None
+
+    def _get_font(self, size: int, bold: bool):
+        key = (size, bold)
+        f = self._fonts.get(key)
+        if f is None:
+            path = self._bold_path if bold else self._reg_path
+            f = ImageFont.truetype(path, size)
+            self._fonts[key] = f
+        return f
+
+    def _get_mask(self, text: str, size: int, bold: bool):
+        key = (text, size, bold)
+        item = self._cache.get(key)
+        if item is not None:
+            return item
+
+        font = self._get_font(size, bold)
+        bbox = font.getbbox(text)
+        x0, y0, x1, y1 = bbox
+        w = max(1, x1 - x0 + 2)
+        h = max(1, y1 - y0 + 2)
+
+        img = Image.new("L", (w, h), 0)
+        draw = ImageDraw.Draw(img)
+        draw.text((-x0 + 1, -y0 + 1), text, font=font, fill=255)
+        mask = np.array(img, dtype=np.uint8)
+
+        if len(self._cache) >= self._max_cache:
+            # Xoa 1/4 cache cu nhat de giu bo nho gon nhe
+            for k in list(self._cache.keys())[: self._max_cache // 4]:
+                del self._cache[k]
+
+        item = (mask, w, h, y0)
+        self._cache[key] = item
+        return item
+
+    def measure(self, text: str, size: int = 13, bold: bool = False):
+        if not text:
+            return 0, size
+        if self._use_pil:
+            _, w, h, _ = self._get_mask(text, size, bold)
+            return w, h
+        scale = max(0.32, size / 32.0)
+        thick = 2 if bold and size >= 16 else 1
+        (tw, th), _ = cv2.getTextSize(_strip_accents(text), cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+        return tw, th
+
+    def draw(self, canvas, text: str, x: int, y: int, size: int = 13,
+             color=TXT_WHITE, bold: bool = False, align: str = "left"):
+        """Ve text voi (x, y) la goc tren-trai (hoac giua/phai theo align)."""
+        if not text:
+            return 0
+
+        if not self._use_pil:
+            clean = _strip_accents(text)
+            scale = max(0.32, size / 32.0)
+            thick = 2 if bold and size >= 16 else 1
+            (tw, th), _ = cv2.getTextSize(clean, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+            if align == "center":
+                x = int(x - tw // 2)
+            elif align == "right":
+                x = int(x - tw)
+            cv2.putText(canvas, clean, (int(x), int(y + th)),
+                        cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
+            return tw
+
+        mask, w, h, y0 = self._get_mask(text, size, bold)
+        if align == "center":
+            x = int(x - w // 2)
+        elif align == "right":
+            x = int(x - w)
+        else:
+            x = int(x)
+        y = int(y + y0)
+
+        ch, cw = canvas.shape[:2]
+        sx0 = max(0, -x)
+        sy0 = max(0, -y)
+        dx0 = max(0, x)
+        dy0 = max(0, y)
+        dx1 = min(cw, x + w)
+        dy1 = min(ch, y + h)
+        if dx1 <= dx0 or dy1 <= dy0:
+            return w
+
+        alpha = mask[sy0:sy0 + (dy1 - dy0), sx0:sx0 + (dx1 - dx0)].astype(np.uint16)[..., None]
+        roi = canvas[dy0:dy1, dx0:dx1].astype(np.uint16)
+        col = np.array(color, dtype=np.uint16).reshape(1, 1, 3)
+        canvas[dy0:dy1, dx0:dx1] = ((roi * (255 - alpha) + col * alpha) >> 8).astype(np.uint8)
+        return w
+
+def _fill_rounded_rect(img, x1, y1, x2, y2, r, color):
+    r = max(0, min(r, (x2 - x1) // 2, (y2 - y1) // 2))
+    if r == 0:
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, cv2.FILLED)
+        return
+    cv2.rectangle(img, (x1 + r, y1), (x2 - r, y2), color, cv2.FILLED)
+    cv2.rectangle(img, (x1, y1 + r), (x2, y2 - r), color, cv2.FILLED)
+    cv2.ellipse(img, (x1 + r, y1 + r), (r, r), 180, 0, 90, color, cv2.FILLED, cv2.LINE_AA)
+    cv2.ellipse(img, (x2 - r, y1 + r), (r, r), 270, 0, 90, color, cv2.FILLED, cv2.LINE_AA)
+    cv2.ellipse(img, (x2 - r, y2 - r), (r, r), 0, 0, 90, color, cv2.FILLED, cv2.LINE_AA)
+    cv2.ellipse(img, (x1 + r, y2 - r), (r, r), 90, 0, 90, color, cv2.FILLED, cv2.LINE_AA)
+
+
+def _stroke_rounded_rect(img, x1, y1, x2, y2, r, color, thickness=1):
+    r = max(0, min(r, (x2 - x1) // 2, (y2 - y1) // 2))
+    if r == 0:
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness, cv2.LINE_AA)
+        return
+    cv2.line(img, (x1 + r, y1), (x2 - r, y1), color, thickness, cv2.LINE_AA)
+    cv2.line(img, (x1 + r, y2), (x2 - r, y2), color, thickness, cv2.LINE_AA)
+    cv2.line(img, (x1, y1 + r), (x1, y2 - r), color, thickness, cv2.LINE_AA)
+    cv2.line(img, (x2, y1 + r), (x2, y2 - r), color, thickness, cv2.LINE_AA)
+    cv2.ellipse(img, (x1 + r, y1 + r), (r, r), 180, 0, 90, color, thickness, cv2.LINE_AA)
+    cv2.ellipse(img, (x2 - r, y1 + r), (r, r), 270, 0, 90, color, thickness, cv2.LINE_AA)
+    cv2.ellipse(img, (x2 - r, y2 - r), (r, r), 0, 0, 90, color, thickness, cv2.LINE_AA)
+    cv2.ellipse(img, (x1 + r, y2 - r), (r, r), 90, 0, 90, color, thickness, cv2.LINE_AA)
+
+
+def _draw_card(img, x1, y1, x2, y2, r=8, bg=BG_CARD, border=BORDER_CARD, glow=False):
+    if glow:
+        _stroke_rounded_rect(img, x1 - 1, y1 - 1, x2 + 1, y2 + 1, r + 1, BORDER_GLOW, 1)
+    _fill_rounded_rect(img, x1, y1, x2, y2, r, bg)
+    _stroke_rounded_rect(img, x1, y1, x2, y2, r, border, 1)
+
+
+def _draw_car_icon(img, cx, cy):
+    # Vom noc xe
+    roof = np.array([
+        [cx - 17, cy + 1],
+        [cx - 11, cy - 11],
+        [cx + 10, cy - 11],
+        [cx + 18, cy + 1],
+    ], dtype=np.int32)
+    cv2.polylines(img, [roof], False, COL_CYAN, 2, cv2.LINE_AA)
+    # Than xe
+    _stroke_rounded_rect(img, cx - 26, cy + 1, cx + 26, cy + 13, 5, TXT_WHITE, 2)
+    # Kinh chan gio
+    cv2.line(img, (cx - 11, cy - 2), (cx + 11, cy - 2), COL_TINT_BORDER, 1, cv2.LINE_AA)
+    # Den pha
+    cv2.circle(img, (cx - 18, cy + 7), 3, COL_AMBER, cv2.FILLED, cv2.LINE_AA)
+    cv2.circle(img, (cx + 18, cy + 7), 3, COL_AMBER, cv2.FILLED, cv2.LINE_AA)
+    # Banh xe
+    cv2.ellipse(img, (cx - 15, cy + 14), (5, 3), 0, 0, 180, TXT_SOFT, 2, cv2.LINE_AA)
+    cv2.ellipse(img, (cx + 15, cy + 14), (5, 3), 0, 0, 180, TXT_SOFT, 2, cv2.LINE_AA)
+    # Duong lan ben duoi
+    cv2.line(img, (cx - 30, cy + 19), (cx + 30, cy + 19), COL_TINT_BORDER, 1, cv2.LINE_AA)
+
+
+def _draw_camera_icon(img, x, y, color=COL_CYAN):
+    _fill_rounded_rect(img, x, y + 3, x + 18, y + 15, 3, color)
+    cv2.rectangle(img, (x + 5, y + 1), (x + 12, y + 4), color, cv2.FILLED)
+    cv2.circle(img, (x + 9, y + 9), 4, BG_HEADER_BAR, cv2.FILLED, cv2.LINE_AA)
+    cv2.circle(img, (x + 9, y + 9), 2, color, cv2.FILLED, cv2.LINE_AA)
+
+
+def _draw_pipeline_icon(img, x, y, color=COL_CYAN):
+    cv2.circle(img, (x + 4, y + 5), 2, color, cv2.FILLED, cv2.LINE_AA)
+    cv2.circle(img, (x + 13, y + 5), 2, color, cv2.FILLED, cv2.LINE_AA)
+    cv2.circle(img, (x + 8, y + 13), 2, COL_GREEN, cv2.FILLED, cv2.LINE_AA)
+    cv2.line(img, (x + 4, y + 6), (x + 8, y + 12), color, 1, cv2.LINE_AA)
+    cv2.line(img, (x + 13, y + 6), (x + 8, y + 12), color, 1, cv2.LINE_AA)
+
+
+def _draw_shield_icon(img, x, y, color=COL_CYAN):
+    pts = np.array([
+        [x + 8, y + 1],
+        [x + 15, y + 4],
+        [x + 14, y + 11],
+        [x + 8, y + 16],
+        [x + 2, y + 11],
+        [x + 1, y + 4],
+    ], dtype=np.int32)
+    cv2.fillPoly(img, [pts], color, cv2.LINE_AA)
+    cv2.line(img, (x + 8, y + 5), (x + 8, y + 10), BG_HEADER_BAR, 2, cv2.LINE_AA)
+    cv2.circle(img, (x + 8, y + 13), 1, BG_HEADER_BAR, cv2.FILLED)
+
+
+def _draw_warning_triangle(img, cx, cy, size=24, color=TXT_MUTED):
+    pts = np.array([
+        [cx, cy - size],
+        [cx + int(size * 1.15), cy + int(size * 0.85)],
+        [cx - int(size * 1.15), cy + int(size * 0.85)],
+    ], dtype=np.int32)
+    cv2.polylines(img, [pts], True, color, 2, cv2.LINE_AA)
+    cv2.line(img, (cx, cy - int(size * 0.38)), (cx, cy + int(size * 0.25)), color, 3, cv2.LINE_AA)
+    cv2.circle(img, (cx, cy + int(size * 0.56)), 2, color, cv2.FILLED, cv2.LINE_AA)
+
+
+def _draw_uart_icon(img, x, y, color=COL_CYAN):
+    _stroke_rounded_rect(img, x, y, x + 22, y + 16, 3, color, 1)
+    cv2.circle(img, (x + 6, y + 6), 2, COL_GREEN, cv2.FILLED, cv2.LINE_AA)
+    cv2.circle(img, (x + 14, y + 6), 2, color, cv2.FILLED, cv2.LINE_AA)
+    cv2.line(img, (x + 5, y + 12), (x + 17, y + 12), color, 1, cv2.LINE_AA)
+
+
+def _draw_power_icon(img, cx, cy, r=6, color=TXT_WHITE):
+    cv2.ellipse(img, (cx, cy + 1), (r, r), 0, -35, 215, color, 2, cv2.LINE_AA)
+    cv2.line(img, (cx, cy - r), (cx, cy - 1), color, 2, cv2.LINE_AA)
 
 class RobotDashboardUI:
-    """
-    Man hinh quan sat 2 Camera doc lap cho Xe Tu Hanh (Dual-Cam Observation Cockpit):
-      - CAM 1 (Trai): Camera Lan duong (nhin xuong mat duong)
-      - CAM 2 (Phai): Camera Bien bao YOLO11n (nhin thang phia truoc)
-      - Hang duoi (che do Chi tiet [D]): Pipeline Lan duong | Ung vien YOLO11n & Dieu khien Xe
-    """
+    TOTAL_W  = 1280
+    TOTAL_H  = 720
+    PAD_X    = 12
+    GAP      = 8
 
-    TOP_H = 42
-    BOT_H = 38
+    HEADER_H = 58
+    TOOL_H   = 40
+    CAM_H    = 332
+    LOWER_H  = 228
+    BOT_H    = 38
 
-    CAM_W = 600
-    CAM_H = 340
-    TOTAL_W = CAM_W * 2          # 1200
-    LOWER_H = 236                # Hang pipeline & dieu khien ben duoi
+    # Che do Quan sat thuan (giu nguyen tong chieu cao 720px, phong to 2 camera)
+    OBS_CAM_H = 508
+    OBS_HUD_H = 52
 
-    OBS_CAM_H = 370              # Chieu cao camera o che do Quan sat thuan (Thu gon)
-    OBS_HUD_H = 44               # Dai thanh toc do / goc lai o che do Quan sat thuan
+    CARD_W = (TOTAL_W - PAD_X * 2 - 10) // 2   # 623px moi card trai/phai
 
-    def __init__(self, win_name="Xe Tu Hanh - Man Hinh Quan Sat 2 Camera", detail_mode=True):
+    def __init__(self, win_name="Xe Tu Hanh", detail_mode=True):
         self.win_name = win_name
         self.available = False
         self.detail_mode = detail_mode
         self._pending_action = None
+        self._hover_action = None
         self._buttons = {}
+        self._txt = _TextEngine()
+        self._last_render_t = time.time()
+        self._ui_fps = 0.0
+
+        # Tao nen tinh 1 lan de tiet kiem CPU moi frame
+        self._base_canvas = self._make_base_canvas()
+
         try:
             cv2.namedWindow(self.win_name, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(self.win_name, self.TOTAL_W, self.TOP_H + self.CAM_H + self.LOWER_H + self.BOT_H)
+            cv2.resizeWindow(self.win_name, self.TOTAL_W, self.TOTAL_H)
             cv2.setMouseCallback(self.win_name, self._on_mouse)
             self.available = True
         except cv2.error:
             self.available = False
 
+    def _make_base_canvas(self):
+        canvas = np.full((self.TOTAL_H, self.TOTAL_W, 3), BG_CANVAS, dtype=np.uint8)
+        cv2.rectangle(canvas, (0, 0), (self.TOTAL_W, self.HEADER_H - 1), BG_HEADER_TOP, cv2.FILLED)
+        cv2.line(canvas, (0, self.HEADER_H - 1), (self.TOTAL_W, self.HEADER_H - 1), BORDER_DIM, 1)
+        return canvas
+
     def _on_mouse(self, event, x, y, flags, param):
-        if event != cv2.EVENT_LBUTTONDOWN:
-            return
+        hovered = None
         for action, (x1, y1, x2, y2) in self._buttons.items():
             if x1 <= x <= x2 and y1 <= y <= y2:
-                self._pending_action = action
+                hovered = action
                 break
+        if event == cv2.EVENT_MOUSEMOVE:
+            self._hover_action = hovered
+        elif event == cv2.EVENT_LBUTTONDOWN and hovered is not None:
+            self._pending_action = hovered
 
-    @staticmethod
-    def _draw_button(canvas, rect, text, bg=(42, 48, 60), border=(105, 118, 138), text_color=(242, 246, 252)):
+    def _draw_button(self, canvas, rect, text, bg=BG_PILL, border=BORDER_BTN,
+                     text_color=TXT_WHITE, bold=False, icon=None, icon_color=None):
         x1, y1, x2, y2 = rect
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), bg, cv2.FILLED)
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), border, 1, cv2.LINE_AA)
-        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.39, 1)
-        tx = x1 + max(4, (x2 - x1 - tw) // 2)
-        ty = y1 + (y2 - y1 + th) // 2 - 1
-        cv2.putText(canvas, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.39, text_color, 1, cv2.LINE_AA)
+        _fill_rounded_rect(canvas, x1, y1, x2, y2, 6, bg)
+        _stroke_rounded_rect(canvas, x1, y1, x2, y2, 6, border, 1)
 
-    @staticmethod
-    def _draw_badge(canvas, x, y, text, bg=(30, 38, 48), border=(90, 100, 115), text_color=(225, 235, 245)):
-        (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)
-        pad_x = 7
-        w = tw + pad_x * 2
-        h = 22
-        cv2.rectangle(canvas, (x, y), (x + w, y + h), bg, cv2.FILLED)
-        cv2.rectangle(canvas, (x, y), (x + w, y + h), border, 1, cv2.LINE_AA)
-        cv2.putText(canvas, text, (x + pad_x, y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.36, text_color, 1, cv2.LINE_AA)
-        return x + w + 6
-
-    @staticmethod
-    def _draw_section_header(panel, title, right_text="", accent=(0, 200, 255)):
-        w = panel.shape[1]
-        cv2.rectangle(panel, (0, 0), (w, 26), (26, 31, 40), cv2.FILLED)
-        cv2.line(panel, (0, 26), (w, 26), (58, 66, 80), 1)
-        cv2.rectangle(panel, (0, 0), (4, 26), accent, cv2.FILLED)
-        cv2.putText(panel, title, (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (235, 240, 248), 1, cv2.LINE_AA)
-        if right_text:
-            (tw, _), _ = cv2.getTextSize(right_text, cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)
-            cv2.putText(panel, right_text, (max(180, w - tw - 10), 17), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (165, 185, 205), 1, cv2.LINE_AA)
-
-    @staticmethod
-    def _draw_viewfinder_corners(img, x0, y0, x1, y1, color=(80, 105, 130), length=14):
-        """Ve 4 goc ngam kieu man hinh giam sat camera."""
-        t = 1
-        cv2.line(img, (x0, y0), (x0 + length, y0), color, t)
-        cv2.line(img, (x0, y0), (x0, y0 + length), color, t)
-        cv2.line(img, (x1, y0), (x1 - length, y0), color, t)
-        cv2.line(img, (x1, y0), (x1, y0 + length), color, t)
-        cv2.line(img, (x0, y1), (x0 + length, y1), color, t)
-        cv2.line(img, (x0, y1), (x0, y1 - length), color, t)
-        cv2.line(img, (x1, y1), (x1 - length, y1), color, t)
-        cv2.line(img, (x1, y1), (x1, y1 - length), color, t)
-
-    @staticmethod
-    def _fit_panel(img, w, h, title=None, placeholder="Dang cho du lieu..."):
-        out = np.full((h, w, 3), (18, 21, 27), dtype=np.uint8)
-        if img is not None and img.size > 0:
-            bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if img.ndim == 2 else img
-            out[:] = cv2.resize(bgr, (w, h), interpolation=cv2.INTER_AREA)
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        ty = cy - 9
+        ic = icon_color if icon_color is not None else TXT_SOFT
+        if icon == "swap":
+            tw, _ = self._txt.measure(text, 13, bold)
+            start_x = cx - (tw + 16) // 2
+            cv2.line(canvas, (start_x, cy - 2), (start_x + 10, cy - 2), ic, 1, cv2.LINE_AA)
+            cv2.line(canvas, (start_x + 7, cy - 5), (start_x + 10, cy - 2), ic, 1, cv2.LINE_AA)
+            cv2.line(canvas, (start_x, cy + 3), (start_x + 10, cy + 3), ic, 1, cv2.LINE_AA)
+            cv2.line(canvas, (start_x + 3, cy + 6), (start_x, cy + 3), ic, 1, cv2.LINE_AA)
+            self._txt.draw(canvas, text, start_x + 15, ty, 13, text_color, bold)
+        elif icon == "dot":
+            tw, _ = self._txt.measure(text, 13, bold)
+            start_x = cx - (tw + 12) // 2
+            cv2.circle(canvas, (start_x + 3, cy), 4, ic, cv2.FILLED, cv2.LINE_AA)
+            self._txt.draw(canvas, text, start_x + 12, ty, 13, text_color, bold)
+        elif icon == "power":
+            tw, _ = self._txt.measure(text, 13, bold)
+            start_x = cx - (tw + 20) // 2
+            _draw_power_icon(canvas, start_x + 6, cy, r=6, color=ic)
+            self._txt.draw(canvas, text, start_x + 20, ty, 13, text_color, bold)
         else:
-            (tw, th), _ = cv2.getTextSize(placeholder, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-            cv2.putText(out, placeholder, ((w - tw) // 2, (h + th) // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (110, 120, 135), 1, cv2.LINE_AA)
+            self._txt.draw(canvas, text, cx, ty, 13, text_color, bold, align="center")
 
-        if title:
-            cv2.rectangle(out, (0, 0), (w, 19), (15, 18, 24), cv2.FILLED)
-            cv2.putText(out, title, (6, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (205, 220, 235), 1, cv2.LINE_AA)
-        cv2.rectangle(out, (0, 0), (w - 1, h - 1), (55, 62, 76), 1)
-        return out
+    def _draw_header(self, canvas, l_cam_fps, s_cam_fps, l_fps, s_fps):
+        _draw_car_icon(canvas, 46, 28)
+        self._txt.draw(
+            canvas,
+            "XE ROBOT NHẬN DIỆN BIỂN BÁO",
+            86, 7, size=20, color=TXT_WHITE, bold=True,
+        )
 
-    @staticmethod
-    def _draw_progress_bar(canvas, x, y, w, h, ratio, fill_color, label_left="", label_right=""):
-        ratio = float(np.clip(ratio, 0.0, 1.0))
-        if label_left:
-            cv2.putText(canvas, label_left, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (200, 210, 225), 1, cv2.LINE_AA)
-        if label_right:
-            (tw, _), _ = cv2.getTextSize(label_right, cv2.FONT_HERSHEY_SIMPLEX, 0.37, 1)
-            cv2.putText(canvas, label_right, (x + w - tw, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (240, 245, 255), 1, cv2.LINE_AA)
-        cv2.rectangle(canvas, (x, y), (x + w, y + h), (33, 38, 48), cv2.FILLED)
-        fill_w = int(round(w * ratio))
-        if fill_w > 0:
-            cv2.rectangle(canvas, (x, y), (x + fill_w, y + h), fill_color, cv2.FILLED)
-        cv2.rectangle(canvas, (x, y), (x + w, y + h), (75, 84, 98), 1)
+        bx2 = self.TOTAL_W - self.PAD_X
+        bx1 = bx2 - 284
+        _draw_card(canvas, bx1, 7, bx2, self.HEADER_H - 8, r=6, bg=BG_SUBCARD, border=BORDER_SUB, glow=False)
+        self._txt.draw(canvas, "FPS:", bx1 + 12, 11, size=13, color=TXT_SOFT, bold=True)
+        self._txt.draw(canvas, f"{self._ui_fps:4.1f}", bx1 + 48, 10, size=15, color=COL_GREEN, bold=True)
 
-    @staticmethod
-    def _draw_bipolar_bar(canvas, x, y, w, h, val, label_left="", label_right=""):
-        val = float(np.clip(val, -1.0, 1.0))
-        if label_left:
-            cv2.putText(canvas, label_left, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (200, 210, 225), 1, cv2.LINE_AA)
-        if label_right:
-            (tw, _), _ = cv2.getTextSize(label_right, cv2.FONT_HERSHEY_SIMPLEX, 0.37, 1)
-            cv2.putText(canvas, label_right, (x + w - tw, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (240, 245, 255), 1, cv2.LINE_AA)
-        cv2.rectangle(canvas, (x, y), (x + w, y + h), (33, 38, 48), cv2.FILLED)
-        mid_x = x + w // 2
-        fill_x = mid_x + int(round((w // 2) * val))
-        col = (0, 220, 140) if abs(val) < 0.25 else ((0, 190, 255) if abs(val) < 0.6 else (70, 130, 255))
-        if fill_x >= mid_x:
-            cv2.rectangle(canvas, (mid_x, y + 1), (fill_x, y + h - 1), col, cv2.FILLED)
-        else:
-            cv2.rectangle(canvas, (fill_x, y + 1), (mid_x, y + h - 1), col, cv2.FILLED)
-        cv2.line(canvas, (mid_x, y - 2), (mid_x, y + h + 2), (220, 225, 235), 1)
-        cv2.rectangle(canvas, (x, y), (x + w, y + h), (75, 84, 98), 1)
+        sub_y = 30
+        parts = [
+            ("C1:", f"{l_cam_fps:.0f}"),
+            ("C2:", f"{s_cam_fps:.0f}"),
+            ("Lane:", f"{l_fps:.0f}"),
+            ("YOLO:", f"{s_fps:.0f}"),
+        ]
+        px = bx1 + 12
+        for idx, (lbl, val) in enumerate(parts):
+            w1 = self._txt.draw(canvas, lbl, px, sub_y, size=12, color=TXT_MUTED)
+            px += w1 + 2
+            w2 = self._txt.draw(canvas, val, px, sub_y, size=12, color=COL_CYAN, bold=True)
+            px += w2 + 8
+            if idx < len(parts) - 1:
+                self._txt.draw(canvas, "|", px - 5, sub_y, size=12, color=BORDER_DIM)
+                px += 4
 
-    def _build_top_bar(self, width, lane_cam_lbl, sign_cam_lbl, fov_pct,
-                       lane_cam_ok, sign_cam_ok, shared_cam, esp_ok,
-                       l_cam_fps, s_cam_fps, l_fps, s_fps):
-        bar = np.full((self.TOP_H, width, 3), (20, 24, 31), dtype=np.uint8)
-        cv2.line(bar, (0, self.TOP_H - 1), (width, self.TOP_H - 1), (62, 70, 84), 1)
+    def _draw_toolbar(self, canvas, lane_cam_lbl, sign_cam_lbl, fov_pct, lane_cam_ok, sign_cam_ok):
+        y1 = self.HEADER_H + 5
+        y2 = self.HEADER_H + self.TOOL_H - 5
 
-        self._buttons = {
-            "switch_lane_cam": (8, 7, 152, 35),
-            "switch_sign_cam": (158, 7, 326, 35),
-            "swap_cams":       (332, 7, 424, 35),
-            "fov_minus":       (432, 7, 460, 35),
-            "fov_reset":       (464, 7, 542, 35),
-            "fov_plus":        (546, 7, 574, 35),
-            "toggle_mode":     (582, 7, 702, 35),
-        }
+        def _pill_bg(action, tinted=False):
+            if tinted:
+                return COL_TINT_HOVER if self._hover_action == action else COL_TINT_BG
+            return BG_PILL_HOVER if self._hover_action == action else BG_PILL
 
-        self._draw_button(bar, self._buttons["switch_lane_cam"], f"Lan:{lane_cam_lbl} [C]", bg=(22, 68, 52), border=(0, 220, 140))
-        self._draw_button(bar, self._buttons["switch_sign_cam"], f"Bien:{sign_cam_lbl[:11]} [V]", bg=(26, 56, 92), border=(0, 195, 255))
-        self._draw_button(bar, self._buttons["swap_cams"], "Doi cho [X]", bg=(64, 52, 30), border=(255, 190, 60))
-        self._draw_button(bar, self._buttons["fov_minus"], "-")
+        x = self.PAD_X
+        self._buttons = {}
+        b_lane = (x, y1, x + 178, y2)
+        self._buttons["switch_lane_cam"] = b_lane
         self._draw_button(
-            bar, self._buttons["fov_reset"], f"FOV:{fov_pct}%",
-            bg=(0, 115, 72) if fov_pct == 100 else (42, 48, 60),
-            border=(0, 230, 145) if fov_pct == 100 else (105, 118, 138),
+            canvas, b_lane, f"Làn: {lane_cam_lbl[:10]} [C]",
+            bg=_pill_bg("switch_lane_cam"), border=BORDER_BTN, text_color=TXT_WHITE,
+            icon="dot", icon_color=COL_GREEN if lane_cam_ok else COL_RED,
         )
-        self._draw_button(bar, self._buttons["fov_plus"], "+")
-        mode_lbl = "Quan sat [D]" if self.detail_mode else "Chi tiet [D]"
+        x = b_lane[2] + 8
+        b_sign = (x, y1, x + 204, y2)
+        self._buttons["switch_sign_cam"] = b_sign
         self._draw_button(
-            bar, self._buttons["toggle_mode"], mode_lbl,
-            bg=(56, 44, 92) if self.detail_mode else (42, 48, 60),
-            border=(175, 140, 255) if self.detail_mode else (105, 118, 138),
+            canvas, b_sign, f"Biển: {sign_cam_lbl[:13]} [V]",
+            bg=_pill_bg("switch_sign_cam"), border=BORDER_BTN, text_color=TXT_WHITE,
+            icon="dot", icon_color=COL_AMBER if sign_cam_ok else COL_RED,
+        )
+        x = b_sign[2] + 8
+        b_swap = (x, y1, x + 124, y2)
+        self._buttons["swap_cams"] = b_swap
+        self._draw_button(
+            canvas, b_swap, "Đổi chỗ [X]",
+            bg=_pill_bg("swap_cams"), border=BORDER_BTN, text_color=TXT_WHITE,
+            icon="swap", icon_color=COL_CYAN,
+        )
+        x = b_swap[2] + 8
+        b_fmin = (x, y1, x + 30, y2)
+        b_frst = (x + 33, y1, x + 127, y2)
+        b_fpls = (x + 130, y1, x + 160, y2)
+        self._buttons["fov_minus"] = b_fmin
+        self._buttons["fov_reset"] = b_frst
+        self._buttons["fov_plus"] = b_fpls
+        self._draw_button(canvas, b_fmin, "-", bg=_pill_bg("fov_minus"), border=BORDER_BTN, text_color=TXT_SOFT, bold=True)
+        self._draw_button(
+            canvas, b_frst, f"FOV: {fov_pct}%",
+            bg=_pill_bg("fov_reset", tinted=True),
+            border=COL_TINT_BORDER,
+            text_color=COL_BLUE, bold=True,
+        )
+        self._draw_button(canvas, b_fpls, "+", bg=_pill_bg("fov_plus"), border=BORDER_BTN, text_color=TXT_SOFT, bold=True)
+        x = b_fpls[2] + 8
+
+        b_mode = (x, y1, x + 138, y2)
+        self._buttons["toggle_mode"] = b_mode
+        mode_lbl = "Quan sát [D]" if self.detail_mode else "Chi tiết [D]"
+        self._draw_button(
+            canvas, b_mode, mode_lbl,
+            bg=_pill_bg("toggle_mode", tinted=not self.detail_mode),
+            border=COL_TINT_BORDER if not self.detail_mode else BORDER_BTN,
+            text_color=COL_BLUE if not self.detail_mode else TXT_WHITE,
         )
 
-        nx = 714
-        nx = self._draw_badge(
-            bar, nx, 10,
-            "CAM1 OK" if lane_cam_ok else "CAM1 ERR",
-            bg=(18, 68, 42) if lane_cam_ok else (35, 35, 95),
-            border=(0, 220, 130) if lane_cam_ok else (80, 90, 255),
-        )
-        sign_badge = "CAM2 CHUNG" if shared_cam else ("CAM2 OK" if sign_cam_ok else "CAM2 ERR")
-        nx = self._draw_badge(
-            bar, nx, 10, sign_badge,
-            bg=(72, 58, 22) if shared_cam else ((18, 60, 88) if sign_cam_ok else (35, 35, 95)),
-            border=(255, 200, 60) if shared_cam else ((0, 200, 255) if sign_cam_ok else (80, 90, 255)),
-        )
-        self._draw_badge(
-            bar, nx, 10,
-            "ESP32" if esp_ok else "SIM",
-            bg=(20, 70, 85) if esp_ok else (48, 48, 56),
-            border=(0, 200, 240) if esp_ok else (125, 130, 140),
+        # Nut tat he thong
+        st_x2 = self.TOTAL_W - self.PAD_X
+        st_x1 = st_x2 - 126
+        b_quit = (st_x1, y1, st_x2, y2)
+        self._buttons["quit_app"] = b_quit
+        self._draw_button(
+            canvas, b_quit, "Tắt [Q]",
+            bg=BTN_QUIT_BG_HOVER if self._hover_action == "quit_app" else BTN_QUIT_BG,
+            border=BTN_QUIT_BORDER, text_color=TXT_WHITE, bold=True,
+            icon="power", icon_color=TXT_WHITE,
         )
 
-        fps_txt = f"FPS  C1:{l_cam_fps:.0f} C2:{s_cam_fps:.0f} | Lane:{l_fps:.0f} YOLO:{s_fps:.0f}"
-        (tw, _), _ = cv2.getTextSize(fps_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.37, 1)
-        cv2.putText(bar, fps_txt, (width - tw - 10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (115, 245, 165), 1, cv2.LINE_AA)
-        return bar
+    def _draw_camera_card(self, canvas, x1, y1, w, h, frame, title, source_pill,
+                          live_ok, status_text, status_col, hud_left="", hud_right="",
+                          hud_right_col=TXT_SOFT, placeholder="Đang chờ tín hiệu Camera..."):
+        x2, y2 = x1 + w, y1 + h
+        _draw_card(canvas, x1, y1, x2, y2, r=8, bg=BG_CARD, border=BORDER_CARD, glow=False)
 
-    def _build_camera_viewport(self, frame, w, h, title, cam_label, accent, status_dot_col,
-                               status_text, hud_left="", hud_right="", placeholder="Dang cho tin hieu Camera..."):
-        panel = np.full((h, w, 3), (14, 17, 23), dtype=np.uint8)
-        hdr_h = 28
-        body_h = h - hdr_h
+        hdr_h = 32
+        # Dai tieu de the noi bat nhe de phan tach phan tieu de va khung video
+        _fill_rounded_rect(canvas, x1 + 1, y1 + 1, x2 - 1, y1 + hdr_h, 7, BG_HEADER_BAR)
+        cv2.rectangle(canvas, (x1 + 1, y1 + hdr_h - 6), (x2 - 1, y1 + hdr_h), BG_HEADER_BAR, cv2.FILLED)
+        cv2.line(canvas, (x1 + 1, y1 + hdr_h), (x2 - 1, y1 + hdr_h), BORDER_DIM, 1)
 
-        # Header camera kieu man hinh giam sat
-        cv2.rectangle(panel, (0, 0), (w, hdr_h), (24, 29, 38), cv2.FILLED)
-        cv2.rectangle(panel, (0, 0), (4, hdr_h), accent, cv2.FILLED)
-        cv2.circle(panel, (16, 14), 5, status_dot_col, cv2.FILLED)
-        cv2.putText(panel, title, (28, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (238, 244, 252), 1, cv2.LINE_AA)
+        _draw_camera_icon(canvas, x1 + 12, y1 + 8, color=COL_CYAN)
+        self._txt.draw(canvas, title, x1 + 38, y1 + 7, size=14, color=TXT_WHITE, bold=True)
 
-        right_hdr = f"{cam_label}  |  {status_text}"
-        (tw, _), _ = cv2.getTextSize(right_hdr, cv2.FONT_HERSHEY_SIMPLEX, 0.37, 1)
-        cv2.putText(panel, right_hdr, (max(260, w - tw - 10), 18), cv2.FONT_HERSHEY_SIMPLEX, 0.37, accent, 1, cv2.LINE_AA)
-        cv2.line(panel, (0, hdr_h), (w, hdr_h), (58, 66, 80), 1)
+        pw, _ = self._txt.measure(source_pill, 12, bold=True)
+        pill_w = pw + 16
+        px2 = x2 - 10
+        px1 = px2 - pill_w
+        _fill_rounded_rect(canvas, px1, y1 + 6, px2, y1 + 26, 5, COL_TINT_BG if live_ok else BG_SUBCARD)
+        _stroke_rounded_rect(canvas, px1, y1 + 6, px2, y1 + 26, 5, COL_TINT_BORDER if live_ok else BORDER_SUB, 1)
+        self._txt.draw(canvas, source_pill, (px1 + px2) // 2, y1 + 8, size=12, color=COL_BLUE if live_ok else TXT_MUTED, bold=True, align="center")
 
-        # Vung hien thi hinh anh camera
+        vx1, vy1 = x1 + 6, y1 + hdr_h + 6
+        vx2, vy2 = x2 - 6, y2 - 6
+        vw, vh = vx2 - vx1, vy2 - vy1
+
         if frame is not None and frame.size > 0:
             bgr = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR) if frame.ndim == 2 else frame
-            panel[hdr_h:h, 0:w] = cv2.resize(bgr, (w, body_h), interpolation=cv2.INTER_AREA)
+            canvas[vy1:vy2, vx1:vx2] = cv2.resize(bgr, (vw, vh), interpolation=cv2.INTER_AREA)
         else:
-            (ptw, pth), _ = cv2.getTextSize(placeholder, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
-            cv2.putText(panel, placeholder, ((w - ptw) // 2, hdr_h + (body_h + pth) // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.46, (115, 125, 140), 1, cv2.LINE_AA)
-
-        # 4 goc ngam quan sat + HUD ban trong suot o day man hinh camera
-        self._draw_viewfinder_corners(panel, 8, hdr_h + 8, w - 9, h - 9, color=(95, 115, 140), length=16)
+            _fill_rounded_rect(canvas, vx1, vy1, vx2, vy2, 6, BG_SUBCARD)
+            self._txt.draw(canvas, placeholder, (vx1 + vx2) // 2, (vy1 + vy2) // 2 - 8,
+                           size=14, color=TXT_MUTED, align="center")
 
         if hud_left or hud_right:
-            ov_y0 = h - 26
-            overlay = panel[ov_y0:h - 2, 2:w - 2].copy()
-            cv2.rectangle(overlay, (0, 0), (overlay.shape[1], overlay.shape[0]), (14, 18, 24), cv2.FILLED)
-            cv2.addWeighted(overlay, 0.68, panel[ov_y0:h - 2, 2:w - 2], 0.32, 0, panel[ov_y0:h - 2, 2:w - 2])
+            ov_h = 26
+            oy1 = vy2 - ov_h
+            roi = canvas[oy1:vy2, vx1:vx2]
+            dark = np.full_like(roi, BG_SUBCARD)
+            cv2.addWeighted(dark, 0.78, roi, 0.22, 0, roi)
             if hud_left:
-                cv2.putText(panel, hud_left, (12, h - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.39, (225, 238, 248), 1, cv2.LINE_AA)
+                self._txt.draw(canvas, hud_left, vx1 + 10, oy1 + 5, size=13, color=TXT_WHITE)
             if hud_right:
-                (rtw, _), _ = cv2.getTextSize(hud_right, cv2.FONT_HERSHEY_SIMPLEX, 0.39, 1)
-                cv2.putText(panel, hud_right, (max(260, w - rtw - 12), h - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.39, (0, 235, 255), 1, cv2.LINE_AA)
+                self._txt.draw(canvas, hud_right, vx2 - 10, oy1 + 5, size=13, color=hud_right_col, bold=True, align="right")
 
-        cv2.rectangle(panel, (0, 0), (w - 1, h - 1), (62, 70, 86), 1)
-        return panel
+        cv2.rectangle(canvas, (vx1, vy1), (vx2 - 1, vy2 - 1), BORDER_DIM, 1)
 
-    def _build_lane_pipeline_panel(self, lane_thres, lane_warp, lane_hist, lane_info):
-        panel = np.full((self.LOWER_H, self.CAM_W, 3), (20, 24, 31), dtype=np.uint8)
-        edge_cnt = lane_info.get("edge_count")
-        edge_str = str(edge_cnt) if edge_cnt is not None else "-"
-        lane_w = lane_info.get("lane_width_px")
-        w_str = f"{lane_w:.0f}px" if isinstance(lane_w, (int, float)) else "-"
-        miss = lane_info.get("missing_frames", 0)
-        self._draw_section_header(
-            panel,
-            "XU LY LAN DUONG (LANE PIPELINE - CAM 1)",
-            f"Bien: {edge_str} | Rong lan: {w_str} | Mat: {miss}",
-            accent=(0, 225, 140),
-        )
+    def _draw_pipeline_card(self, canvas, x1, y1, w, h, lane_thres, lane_warp, lane_hist):
+        x2, y2 = x1 + w, y1 + h
+        _draw_card(canvas, x1, y1, x2, y2, r=8, bg=BG_CARD, border=BORDER_CARD, glow=False)
 
+        hdr_h = 30
+        _fill_rounded_rect(canvas, x1 + 1, y1 + 1, x2 - 1, y1 + hdr_h, 7, BG_HEADER_BAR)
+        cv2.rectangle(canvas, (x1 + 1, y1 + hdr_h - 6), (x2 - 1, y1 + hdr_h), BG_HEADER_BAR, cv2.FILLED)
+        cv2.line(canvas, (x1 + 1, y1 + hdr_h), (x2 - 1, y1 + hdr_h), BORDER_DIM, 1)
+
+        _draw_pipeline_icon(canvas, x1 + 12, y1 + 7, color=COL_CYAN)
+        self._txt.draw(canvas, "XỬ LÝ LÀN ĐƯỜNG (LANE PIPELINE)",
+                       x1 + 36, y1 + 6, size=13, color=TXT_WHITE, bold=True)
+
+        # Chuyen Threshold thanh xanh ngoc dong bo tren nen toi sau
         thres_vis = None
         if lane_thres is not None and lane_thres.size > 0:
-            thres_vis = cv2.cvtColor(lane_thres, cv2.COLOR_GRAY2BGR)
-            thres_vis[lane_thres > 0] = (140, 255, 160)
+            thres_vis = np.full((lane_thres.shape[0], lane_thres.shape[1], 3), (18, 15, 13), dtype=np.uint8)
+            thres_vis[lane_thres > 0] = COL_GREEN
 
-        cell_w, cell_h = 190, 194
-        y0 = 34
-        p1 = self._fit_panel(thres_vis, cell_w, cell_h, "1. Nguong (Threshold)")
-        p2 = self._fit_panel(lane_warp, cell_w, cell_h, "2. Bird-Eye Warp")
-        for gx in range(cell_w // 4, cell_w, cell_w // 4):
-            cv2.line(p2, (gx, 19), (gx, cell_h - 1), (55, 65, 75), 1)
-        p3 = self._fit_panel(lane_hist, cell_w, cell_h, "3. Histogram & Bien")
+        pad = 10
+        gap = 8
+        cell_w = (w - pad * 2 - gap * 2) // 3
+        cell_y1 = y1 + hdr_h + 8
+        cell_y2 = y2 - 10
+        cell_h = cell_y2 - cell_y1
+        title_h = 26
 
-        panel[y0:y0 + cell_h, 8:8 + cell_w] = p1
-        panel[y0:y0 + cell_h, 205:205 + cell_w] = p2
-        panel[y0:y0 + cell_h, 402:402 + cell_w] = p3
-        cv2.rectangle(panel, (0, 0), (self.CAM_W - 1, self.LOWER_H - 1), (55, 62, 75), 1)
-        return panel
+        items = [
+            ("1. Ngưỡng (Threshold)", thres_vis),
+            ("2. Biến dạng mắt chim", lane_warp),
+            ("3. Biểu đồ (Histogram)", lane_hist),
+        ]
 
-    def _build_sign_and_control_panel(self, signs, sign_dbg, sign_info, sign_action,
-                                      lane_state, lane_info, corner_info, light_mode,
-                                      curve_val, speed_pct, err_val, cmd_str,
-                                      lane_age_ms, sign_age_ms, esp_ok, esp_port):
-        panel = np.full((self.LOWER_H, self.CAM_W, 3), (20, 24, 31), dtype=np.uint8)
-        cands = sign_dbg.get("candidate_boxes", []) if sign_dbg else []
-        self._draw_section_header(
-            panel,
-            "BIEN BAO YOLO11n (CAM 2) & DIEU KHIEN XE",
-            f"Xac nhan: {len(signs)} | Ung vien: {len(cands)} | CMD: {cmd_str}",
-            accent=(0, 195, 255),
-        )
+        for idx, (label, img) in enumerate(items):
+            cx1 = x1 + pad + idx * (cell_w + gap)
+            cx2 = cx1 + cell_w
+            _fill_rounded_rect(canvas, cx1, cell_y1, cx2, cell_y2, 6, BG_SUBCARD)
+            _stroke_rounded_rect(canvas, cx1, cell_y1, cx2, cell_y2, 6, BORDER_SUB, 1)
 
-        # Cot trai (250px): Danh sach Ung vien / Crop YOLO11n + Hanh dong uu tien
-        left_w = 248
-        box_y, box_h = 34, 194
-        cv2.rectangle(panel, (8, box_y), (8 + left_w, box_y + box_h), (16, 20, 27), cv2.FILLED)
-        cv2.rectangle(panel, (8, box_y), (8 + left_w, box_y + box_h), (55, 62, 76), 1)
-        cv2.rectangle(panel, (8, box_y), (8 + left_w, box_y + 20), (24, 30, 40), cv2.FILLED)
-        cv2.putText(panel, "Ung vien YOLO11n (Crop)", (14, box_y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (205, 222, 240), 1, cv2.LINE_AA)
+            self._txt.draw(canvas, label, (cx1 + cx2) // 2, cell_y1 + 5,
+                           size=12, color=TXT_SOFT, bold=True, align="center")
+
+            ix1, iy1 = cx1 + 3, cell_y1 + title_h
+            ix2, iy2 = cx2 - 3, cell_y2 - 3
+            iw, ih = ix2 - ix1, iy2 - iy1
+            if img is not None and img.size > 0:
+                bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if img.ndim == 2 else img
+                canvas[iy1:iy2, ix1:ix2] = cv2.resize(bgr, (iw, ih), interpolation=cv2.INTER_AREA)
+            else:
+                self._txt.draw(canvas, "Chờ dữ liệu...", (ix1 + ix2) // 2, (iy1 + iy2) // 2 - 7,
+                               size=12, color=TXT_MUTED, align="center")
+
+    def _draw_progress_bar(self, canvas, x, y, w, h, ratio, fill_col_start, fill_col_end):
+        ratio = float(np.clip(ratio, 0.0, 1.0))
+        _fill_rounded_rect(canvas, x, y, x + w, y + h, 4, BG_TRACK)
+        fill_w = int(round(w * ratio))
+        if fill_w > 2:
+            grad = np.zeros((h - 2, fill_w, 3), dtype=np.uint8)
+            t = np.linspace(0.0, 1.0, fill_w, dtype=np.float32).reshape(1, fill_w, 1)
+            c0 = np.array(fill_col_start, dtype=np.float32).reshape(1, 1, 3)
+            c1 = np.array(fill_col_end, dtype=np.float32).reshape(1, 1, 3)
+            grad[:] = (c0 * (1.0 - t) + c1 * t).astype(np.uint8)
+            canvas[y + 1:y + h - 1, x + 1:x + 1 + fill_w] = grad[:, :max(0, min(fill_w, w - 2))]
+        _stroke_rounded_rect(canvas, x, y, x + w, y + h, 4, BORDER_SUB, 1)
+
+    def _draw_bipolar_bar(self, canvas, x, y, w, h, val):
+        val = float(np.clip(val, -1.0, 1.0))
+        _fill_rounded_rect(canvas, x, y, x + w, y + h, 4, BG_TRACK)
+        mid_x = x + w // 2
+        fill_x = mid_x + int(round((w // 2 - 2) * val))
+        col = COL_GREEN if abs(val) < 0.25 else (COL_AMBER if abs(val) < 0.6 else COL_ORANGE)
+        if fill_x > mid_x:
+            cv2.rectangle(canvas, (mid_x, y + 2), (fill_x, y + h - 2), col, cv2.FILLED)
+        elif fill_x < mid_x:
+            cv2.rectangle(canvas, (fill_x, y + 2), (mid_x, y + h - 2), col, cv2.FILLED)
+        cv2.line(canvas, (mid_x, y - 2), (mid_x, y + h + 2), TXT_SOFT, 1, cv2.LINE_AA)
+        _stroke_rounded_rect(canvas, x, y, x + w, y + h, 4, BORDER_SUB, 1)
+
+    def _draw_sign_control_card(self, canvas, x1, y1, w, h, sign_dbg, sign_info,
+                                lane_state, lane_info, corner_info, light_mode,
+                                curve_val, speed_pct, err_val,
+                                lane_age_ms, sign_age_ms, esp_ok, esp_port):
+        x2, y2 = x1 + w, y1 + h
+        _draw_card(canvas, x1, y1, x2, y2, r=8, bg=BG_CARD, border=BORDER_CARD, glow=False)
+
+        hdr_h = 30
+        _fill_rounded_rect(canvas, x1 + 1, y1 + 1, x2 - 1, y1 + hdr_h, 7, BG_HEADER_BAR)
+        cv2.rectangle(canvas, (x1 + 1, y1 + hdr_h - 6), (x2 - 1, y1 + hdr_h), BG_HEADER_BAR, cv2.FILLED)
+        cv2.line(canvas, (x1 + 1, y1 + hdr_h), (x2 - 1, y1 + hdr_h), BORDER_DIM, 1)
+
+        _draw_shield_icon(canvas, x1 + 12, y1 + 6, color=COL_CYAN)
+        self._txt.draw(canvas, "BIỂN BÁO & ĐIỀU KHIỂN XE",
+                       x1 + 36, y1 + 6, size=13, color=TXT_WHITE, bold=True)
+
+        pad = 10
+        by1 = y1 + hdr_h + 8
+        by2 = y2 - 10
+
+        # --- Hop trai: Hien thi bien bao YOLO11n ---
+        left_w = 236
+        lx1, lx2 = x1 + pad, x1 + pad + left_w
+        _fill_rounded_rect(canvas, lx1, by1, lx2, by2, 6, BG_SUBCARD)
+        _stroke_rounded_rect(canvas, lx1, by1, lx2, by2, 6, BORDER_SUB, 1)
 
         previews = sign_dbg.get("yolo_previews", sign_dbg.get("onnx_previews", [])) if sign_dbg else []
         if previews:
-            for idx, prev in enumerate(previews[:2]):
-                ry = box_y + 28 + idx * 54
+            for idx, prev in enumerate(previews[:3]):
+                ry = by1 + 10 + idx * 56
                 crop = prev.get("crop_bgr")
                 cls_name = prev.get("cls_name", "?")
                 sc = float(prev.get("score", 0.0))
                 ok = bool(prev.get("accepted", False))
+
                 if crop is not None and crop.size > 0:
-                    panel[ry:ry + 44, 16:60] = cv2.resize(crop, (44, 44), interpolation=cv2.INTER_AREA)
-                b_col = (0, 235, 130) if ok else (0, 155, 255)
-                cv2.rectangle(panel, (16, ry), (60, ry + 44), b_col, 1)
+                    canvas[ry:ry + 44, lx1 + 10:lx1 + 54] = cv2.resize(crop, (44, 44), interpolation=cv2.INTER_AREA)
+                b_col = COL_GREEN if ok else COL_AMBER
+                cv2.rectangle(canvas, (lx1 + 10, ry), (lx1 + 54, ry + 44), b_col, 1, cv2.LINE_AA)
+
                 vn_name = sign_info.get(cls_name, {"vn": cls_name})["vn"]
-                st_txt = "NHAN" if ok else "THAP"
-                cv2.putText(panel, vn_name[:18], (68, ry + 17), cv2.FONT_HERSHEY_SIMPLEX, 0.39, (235, 242, 250), 1, cv2.LINE_AA)
-                cv2.putText(panel, f"{sc:.0%} [{st_txt}]", (68, ry + 36), cv2.FONT_HERSHEY_SIMPLEX, 0.37, b_col, 1, cv2.LINE_AA)
+                self._txt.draw(canvas, vn_name[:18], lx1 + 64, ry + 4, size=13, color=TXT_WHITE, bold=True)
+                st_txt = "NHẬN" if ok else "THẤP"
+                self._txt.draw(canvas, f"{sc:.0%}  [{st_txt}]", lx1 + 64, ry + 24, size=12, color=b_col, bold=True)
         else:
-            cv2.putText(panel, "Chua phat hien bien bao", (38, box_y + 84), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (110, 122, 138), 1, cv2.LINE_AA)
+            cx = (lx1 + lx2) // 2
+            cy = (by1 + by2) // 2 - 14
+            _draw_warning_triangle(canvas, cx, cy, size=24, color=COL_AMBER)
+            self._txt.draw(canvas, "Chưa phát hiện biển báo", cx, cy + 32,
+                           size=13, color=TXT_SOFT, bold=True, align="center")
 
-        # Hop hanh dong uu tien bien bao o day cot trai
-        cv2.line(panel, (12, box_y + 140), (left_w + 4, box_y + 140), (50, 58, 70), 1)
-        act_lbl = sign_action if sign_action else "Khong co hanh dong"
-        act_col = (80, 225, 255) if sign_action else (140, 150, 165)
-        cv2.putText(panel, "Uu tien bien bao:", (16, box_y + 158), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 162, 178), 1, cv2.LINE_AA)
-        cv2.putText(panel, act_lbl[:26], (16, box_y + 180), cv2.FONT_HERSHEY_SIMPLEX, 0.42, act_col, 1, cv2.LINE_AA)
+        # --- Hop phai: Dieu khien dong co & thong so telemetry ---
+        rx1 = lx2 + 10
+        rx2 = x2 - pad
+        rw = rx2 - rx1
+        _fill_rounded_rect(canvas, rx1, by1, rx2, by2, 6, BG_SUBCARD)
+        _stroke_rounded_rect(canvas, rx1, by1, rx2, by2, 6, BORDER_SUB, 1)
 
-        # Cot phai (330px): Dieu khien dong co + Goc lai + Thong so Watchdog/ESP32
-        rx = 266
-        rw = self.CAM_W - rx - 8
-        cv2.rectangle(panel, (rx, box_y), (rx + rw, box_y + box_h), (16, 20, 27), cv2.FILLED)
-        cv2.rectangle(panel, (rx, box_y), (rx + rw, box_y + box_h), (55, 62, 76), 1)
+        bx = rx1 + 12
+        bw = rw - 24
 
-        spd_col = (70, 120, 255) if speed_pct == 0 else ((0, 215, 255) if speed_pct < 60 else (0, 225, 130))
-        self._draw_progress_bar(
-            panel, rx + 12, box_y + 26, rw - 24, 14,
-            abs(speed_pct) / 100.0, spd_col,
-            "Toc do dong co", f"{speed_pct}%",
-        )
-        self._draw_bipolar_bar(
-            panel, rx + 12, box_y + 66, rw - 24, 14,
-            err_val,
-            "Goc lai / Lech tam", f"Err:{err_val:+.2f} | Curve:{curve_val:+.2f}",
-        )
+        # 1. Thanh toc do dong co
+        self._txt.draw(canvas, "Tốc độ động cơ", bx, by1 + 6, size=13, color=TXT_WHITE, bold=True)
+        self._txt.draw(canvas, f"{speed_pct}%", bx + bw, by1 + 6, size=14, color=TXT_WHITE, bold=True, align="right")
+        if speed_pct == 0:
+            c0, c1 = COL_RED_DARK, COL_RED
+        elif speed_pct < 60:
+            c0, c1 = COL_AMBER_DARK, COL_AMBER
+        else:
+            c0, c1 = COL_GREEN_DARK, COL_GREEN
+        self._draw_progress_bar(canvas, bx, by1 + 26, bw, 13, abs(speed_pct) / 100.0, c0, c1)
 
+        # 2. Thanh goc lai / lech tam
+        self._txt.draw(canvas, "Góc lái / Lệch tâm", bx, by1 + 45, size=12, color=TXT_SOFT)
+        self._txt.draw(canvas, f"Err: {err_val:+.2f}  |  Curve: {curve_val:+.2f}",
+                       bx + bw, by1 + 45, size=12, color=TXT_WHITE, bold=True, align="right")
+        self._draw_bipolar_bar(canvas, bx, by1 + 63, bw, 9, err_val)
+
+        # 3. Bang 5 dong thong so
         conf = float(lane_info.get("confidence", 0.0))
         c_state = corner_info.get("state", "NONE") if isinstance(corner_info, dict) else "NONE"
         c_dir = corner_info.get("direction", "-") if isinstance(corner_info, dict) else "-"
-        esp_txt = f"Ket noi ({esp_port})" if esp_ok else "Mo phong (Chua co cong)"
+        esp_txt = f"Kết nối ({esp_port})" if esp_ok else "Mô phỏng (Chưa có cổng)"
+        delay_col = COL_RED if lane_age_ms > 250 else TXT_WHITE
 
         rows = [
-            ("Lan duong:", f"{lane_state} ({conf:.0%})", (120, 240, 175)),
-            ("Goc cua:", f"{c_state} ({c_dir})", (220, 228, 240)),
-            ("Watchdog:", f"Lane:{lane_age_ms:.0f}ms | Sign:{sign_age_ms:.0f}ms", (205, 215, 230)),
-            ("Anh sang:", f"{light_mode}", (255, 210, 100)),
-            ("ESP32:", esp_txt, (85, 225, 255) if esp_ok else (160, 170, 185)),
+            ("Làn đường :", f"{lane_state} ({conf:.0%})", COL_GREEN),
+            ("Góc cua :",   f"{c_state} ({c_dir})",        TXT_WHITE),
+            ("Thời trễ :",  f"Lane: {lane_age_ms:.0f} ms  |  Sign: {sign_age_ms:.0f} ms", delay_col),
+            ("Ánh sáng :",  f"{light_mode}",               COL_CYAN),
+            ("ESP32 :",     esp_txt,                       COL_GREEN if esp_ok else TXT_SOFT),
         ]
         for idx, (k, v, v_col) in enumerate(rows):
-            ry = box_y + 102 + idx * 19
-            cv2.putText(panel, k, (rx + 12, ry), cv2.FONT_HERSHEY_SIMPLEX, 0.37, (150, 162, 178), 1, cv2.LINE_AA)
-            cv2.putText(panel, v[:30], (rx + 98, ry), cv2.FONT_HERSHEY_SIMPLEX, 0.37, v_col, 1, cv2.LINE_AA)
+            ry = by1 + 80 + idx * 19
+            self._txt.draw(canvas, k, bx, ry, size=12, color=TXT_MUTED)
+            self._txt.draw(canvas, v[:34], bx + 84, ry, size=12, color=v_col, bold=(idx in (0, 3)))
 
-        cv2.rectangle(panel, (0, 0), (self.CAM_W - 1, self.LOWER_H - 1), (55, 62, 75), 1)
-        return panel
+    def _draw_compact_hud_strip(self, canvas, y1, speed_pct, err_val, curve_val,
+                                lane_state, conf, light_mode, esp_ok, esp_port):
+        x1 = self.PAD_X
+        x2 = self.TOTAL_W - self.PAD_X
+        y2 = y1 + self.OBS_HUD_H
+        _draw_card(canvas, x1, y1, x2, y2, r=8, bg=BG_CARD, border=BORDER_CARD, glow=False)
 
-    def _build_compact_hud_strip(self, speed_pct, err_val, curve_val, cmd_str, lane_state, sign_action):
-        strip = np.full((self.OBS_HUD_H, self.TOTAL_W, 3), (18, 22, 29), dtype=np.uint8)
-        cv2.line(strip, (0, 0), (self.TOTAL_W, 0), (58, 66, 80), 1)
-        spd_col = (70, 120, 255) if speed_pct == 0 else ((0, 215, 255) if speed_pct < 60 else (0, 225, 130))
-        self._draw_progress_bar(strip, 16, 22, 260, 12, abs(speed_pct) / 100.0, spd_col, "Toc do", f"{speed_pct}%")
-        self._draw_bipolar_bar(strip, 300, 22, 320, 12, err_val, "Goc lai", f"Err:{err_val:+.2f} | C:{curve_val:+.2f}")
+        # Thanh toc do
+        self._txt.draw(canvas, "Tốc độ", x1 + 14, y1 + 6, size=12, color=TXT_SOFT)
+        self._txt.draw(canvas, f"{speed_pct}%", x1 + 244, y1 + 6, size=13, color=TXT_WHITE, bold=True, align="right")
+        c0, c1 = (COL_RED_DARK, COL_RED) if speed_pct == 0 else (COL_GREEN_DARK, COL_GREEN)
+        self._draw_progress_bar(canvas, x1 + 14, y1 + 26, 230, 12, abs(speed_pct) / 100.0, c0, c1)
 
-        act_txt = sign_action if sign_action else "Khong co bien bao uu tien"
-        cv2.putText(strip, f"CMD: {cmd_str}  |  Lan: {lane_state}", (650, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (230, 238, 248), 1, cv2.LINE_AA)
-        cv2.putText(strip, f"Hanh dong bien bao: {act_txt}", (650, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.39, (0, 225, 255) if sign_action else (150, 160, 175), 1, cv2.LINE_AA)
-        return strip
+        # Thanh goc lai
+        self._txt.draw(canvas, "Góc lái", x1 + 272, y1 + 6, size=12, color=TXT_SOFT)
+        self._txt.draw(canvas, f"Err: {err_val:+.2f} | C: {curve_val:+.2f}",
+                       x1 + 542, y1 + 6, size=12, color=TXT_WHITE, bold=True, align="right")
+        self._draw_bipolar_bar(canvas, x1 + 272, y1 + 27, 270, 11, err_val)
 
-    def _build_bottom_bar(self, width, pkt, lane_state, sign_action):
-        bar = np.full((self.BOT_H, width, 3), (20, 24, 31), dtype=np.uint8)
-        cv2.line(bar, (0, 0), (width, 0), (62, 70, 84), 1)
+        # Thong so cot loi (khi bang chi tiet dang an)
+        esp_lbl = f"ESP32 ({esp_port})" if esp_ok else "Mô phỏng (SIM)"
+        self._txt.draw(canvas, f"Làn: {lane_state} ({conf:.0%})", x1 + 576, y1 + 16, size=13, color=COL_GREEN, bold=True)
+        self._txt.draw(canvas, f"Ánh sáng: {light_mode}", x1 + 810, y1 + 16, size=13, color=COL_CYAN, bold=True)
+        self._txt.draw(canvas, esp_lbl, x2 - 16, y1 + 16, size=13,
+                       color=COL_GREEN if esp_ok else TXT_SOFT, bold=True, align="right")
 
+    def _draw_bottom_bar(self, canvas, pkt):
+        y1 = self.TOTAL_H - self.BOT_H
+        cv2.rectangle(canvas, (0, y1), (self.TOTAL_W, self.TOTAL_H), BG_HEADER_TOP, cv2.FILLED)
+        cv2.line(canvas, (0, y1), (self.TOTAL_W, y1), BORDER_DIM, 1)
+
+        _draw_uart_icon(canvas, self.PAD_X + 2, y1 + 11, color=COL_CYAN)
         is_stop = "STOP" in pkt
-        pkt_col = (90, 140, 255) if is_stop else (90, 255, 140)
-        cv2.putText(bar, f"UART: {pkt}", (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.44, pkt_col, 1, cv2.LINE_AA)
+        pkt_col = COL_RED if is_stop else COL_GREEN
+        self._txt.draw(canvas, f"UART: {pkt}", self.PAD_X + 34, y1 + 10, size=14, color=pkt_col, bold=True)
 
-        act_txt = sign_action if sign_action else "Khong"
-        right_txt = f"Lan: {lane_state}  |  Bien: {act_txt}  |  [C] Cam1  [V] Cam2  [X] Hoan doi  [+/-] FOV  [D] Che do  [Q] Thoat"
-        (tw, _), _ = cv2.getTextSize(right_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-        cv2.putText(bar, right_txt, (max(230, width - tw - 12), 24), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (210, 220, 235), 1, cv2.LINE_AA)
-        return bar
+        keys_txt = "[C] Cam1    [V] Cam2    [X] Hoán đổi    [+/-] FOV    [D] Chế độ    [Q] Thoát"
+        self._txt.draw(canvas, keys_txt, self.TOTAL_W - self.PAD_X, y1 + 11,
+                       size=13, color=TXT_SOFT, align="right")
 
     def render_and_poll(self, state, cam_rig, sign_info):
-        """
-        Ve giao dien quan sat 2 Camera (CAM 1 Lan duong | CAM 2 Bien bao YOLO11n)
-        va xu ly su kien chuot/phim. Tra ve False neu nguoi dung bam thoat ('q' / ESC).
-        """
         if not self.available:
             return True
 
         now = time.time()
+        dt = now - self._last_render_t
+        self._last_render_t = now
+        if dt > 0.001:
+            inst_fps = min(120.0, 1.0 / dt)
+            self._ui_fps = inst_fps if self._ui_fps == 0.0 else (self._ui_fps * 0.85 + inst_fps * 0.15)
+
         with state.cam_lock:
             l_cam_fps = state.lane_cam_fps
             s_cam_fps = state.sign_cam_fps
@@ -431,85 +800,101 @@ class RobotDashboardUI:
             esp_ok = bool(getattr(state, "esp32_connected", False))
             esp_port = str(getattr(state, "esp32_port", ""))
 
-        # Khung CAM 2 (Bien bao): uu tien ve khung xac nhan len anh goc cua Cam 2 (khong de len Cam 1!)
+        # Ve bounding box bien bao len khung hinh Cam 2
         sign_vis = raw_sign_frame.copy() if raw_sign_frame is not None else (
             sign_dbg["yolo_vis"].copy() if ("yolo_vis" in sign_dbg and sign_dbg["yolo_vis"] is not None) else None
         )
         if sign_vis is not None:
-            # Ve nhe cac ung vien duoi nguong (mau cam dut) de de quan sat
             for prev in sign_dbg.get("yolo_previews", []):
                 if not prev.get("accepted", False):
                     bx, by, bw, bh = prev["box"]
-                    cv2.rectangle(sign_vis, (bx, by), (bx + bw, by + bh), (0, 150, 255), 1, cv2.LINE_AA)
-            # Ve dam cac bien bao da xac nhan on dinh qua SignTracker
+                    cv2.rectangle(sign_vis, (bx, by), (bx + bw, by + bh), COL_AMBER, 1, cv2.LINE_AA)
             for cls_name, x, y, w, h, score in signs:
-                info = sign_info.get(cls_name, {"vn": cls_name, "color": (0, 255, 0)})
+                info = sign_info.get(cls_name, {"vn": cls_name, "color": COL_GREEN})
                 col = info["color"]
                 label = f"{info['vn']} ({score:.0%})"
                 cv2.rectangle(sign_vis, (x, y), (x + w, y + h), col, 2, cv2.LINE_AA)
                 (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1)
                 tx = max(4, min(x, sign_vis.shape[1] - tw - 10))
                 ty = max(th + 8, y - 5)
-                cv2.rectangle(sign_vis, (tx - 2, ty - th - 5), (tx + tw + 6, ty + 3), (18, 22, 28), -1)
-                cv2.putText(sign_vis, label, (tx + 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 255), 1, cv2.LINE_AA)
+                cv2.rectangle(sign_vis, (tx - 2, ty - th - 5), (tx + tw + 6, ty + 3), BG_SUBCARD, -1)
+                cv2.putText(sign_vis, label, (tx + 2, ty - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.50, COL_AMBER, 1, cv2.LINE_AA)
 
         lane_cam_lbl = cam_rig.get_lane_label()
         sign_cam_lbl = cam_rig.get_sign_label()
         conf = float(l_info.get("confidence", 0.0))
-        cam_h = self.CAM_H if self.detail_mode else self.OBS_CAM_H
 
-        cam1_panel = self._build_camera_viewport(
-            lane_vis, self.CAM_W, cam_h,
-            title="CAM 1: QUAN SAT LAN DUONG",
-            cam_label=lane_cam_lbl,
-            accent=(0, 225, 140),
-            status_dot_col=(0, 235, 130) if lane_cam_ok else (70, 70, 255),
-            status_text="LIVE" if lane_cam_ok else "MAT TIN HIEU",
-            hud_left=f"Trang thai: {l_state} | Sang: {light_mode} | Tin cay: {conf:.0%}",
-            hud_right=f"Err: {err_val:+.2f}",
-            placeholder="Dang cho Camera 1 (Lan duong)...",
+        dashboard = self._base_canvas.copy()
+
+        # 1. Thanh Tieu de & FPS
+        self._draw_header(dashboard, l_cam_fps, s_cam_fps, l_fps, s_fps)
+
+        # 2. Thanh cong cu dieu khien
+        self._draw_toolbar(dashboard, lane_cam_lbl, sign_cam_lbl, fov_pct, lane_cam_ok, sign_cam_ok or shared_cam)
+
+        # 3. Hang 2 Camera
+        cam_y = self.HEADER_H + self.TOOL_H + self.GAP
+        cam_h = self.CAM_H if self.detail_mode else self.OBS_CAM_H
+        left_x = self.PAD_X
+        right_x = self.PAD_X + self.CARD_W + 10
+
+        # Cam 1 khong lap lai HUD Trang thai/Sang/Err vi da co trong bang Dieu khien ben duoi
+        self._draw_camera_card(
+            dashboard, left_x, cam_y, self.CARD_W, cam_h,
+            frame=lane_vis,
+            title="CAM 1 – QUAN SÁT LÀN ĐƯỜNG",
+            source_pill=lane_cam_lbl,
+            live_ok=lane_cam_ok,
+            status_text="LIVE" if lane_cam_ok else "MẤT TÍN HIỆU",
+            status_col=COL_GREEN if lane_cam_ok else COL_RED,
+            placeholder="Đang chờ Camera 1 (Làn đường)...",
         )
 
-        sign_hud_left = f"YOLO11n | Phat hien: {len(signs)} bien" if sign_dbg else "Chua nap model yolo11n_10signs.onnx"
-        sign_hud_right = sign_action if sign_action else "Khong co lenh uu tien"
-        cam2_panel = self._build_camera_viewport(
-            sign_vis, self.CAM_W, cam_h,
-            title="CAM 2: QUAN SAT BIEN BAO (YOLO11n)",
-            cam_label=sign_cam_lbl,
-            accent=(0, 195, 255),
-            status_dot_col=(255, 200, 60) if shared_cam else ((0, 220, 255) if sign_cam_ok else (70, 70, 255)),
-            status_text="CHUNG CAM 1" if shared_cam else ("LIVE" if sign_cam_ok else "MAT TIN HIEU"),
+        sign_hud_left = f"Phát hiện: {len(signs)} biển" if sign_dbg else "Chưa nạp model YOLO11n"
+        sign_hud_right = sign_action if sign_action else "Không có lệnh ưu tiên"
+        self._draw_camera_card(
+            dashboard, right_x, cam_y, self.CARD_W, cam_h,
+            frame=sign_vis,
+            title="CAM 2 – QUAN SÁT BIỂN BÁO (YOLO11n)",
+            source_pill=sign_cam_lbl,
+            live_ok=sign_cam_ok or shared_cam,
+            status_text="LIVE" if (sign_cam_ok or shared_cam) else "MẤT TÍN HIỆU",
+            status_col=COL_GREEN if (sign_cam_ok or shared_cam) else COL_RED,
             hud_left=sign_hud_left,
             hud_right=sign_hud_right,
-            placeholder="Dang cho Camera 2 (Bien bao)...",
+            hud_right_col=COL_AMBER if sign_action else TXT_MUTED,
+            placeholder="Đang chờ Camera 2 (Biển báo)...",
         )
 
-        cams_row = np.hstack([cam1_panel, cam2_panel])
-        top_bar = self._build_top_bar(
-            self.TOTAL_W, lane_cam_lbl, sign_cam_lbl, fov_pct,
-            lane_cam_ok, sign_cam_ok, shared_cam, esp_ok,
-            l_cam_fps, s_cam_fps, l_fps, s_fps,
-        )
-        bot_bar = self._build_bottom_bar(self.TOTAL_W, pkt, l_state, sign_action)
-
+        # 4. Hang duoi (Chi tiet hoac Dai HUD thu gon)
+        lower_y = cam_y + cam_h + self.GAP
         if self.detail_mode:
-            left_lower = self._build_lane_pipeline_panel(lane_thres, lane_warp, lane_hist, l_info)
-            right_lower = self._build_sign_and_control_panel(
-                signs, sign_dbg, sign_info, sign_action,
-                l_state, l_info, c_info, light_mode,
-                curve_val, speed_pct, err_val, cmd_str,
-                lane_age_ms, sign_age_ms, esp_ok, esp_port,
+            self._draw_pipeline_card(
+                dashboard, left_x, lower_y, self.CARD_W, self.LOWER_H,
+                lane_thres, lane_warp, lane_hist,
             )
-            lower_row = np.hstack([left_lower, right_lower])
-            dashboard = np.vstack([top_bar, cams_row, lower_row, bot_bar])
+            self._draw_sign_control_card(
+                dashboard, right_x, lower_y, self.CARD_W, self.LOWER_H,
+                sign_dbg, sign_info, l_state, l_info, c_info, light_mode,
+                curve_val, speed_pct, err_val, lane_age_ms, sign_age_ms, esp_ok, esp_port,
+            )
         else:
-            hud_strip = self._build_compact_hud_strip(speed_pct, err_val, curve_val, cmd_str, l_state, sign_action)
-            dashboard = np.vstack([top_bar, cams_row, hud_strip, bot_bar])
+            self._draw_compact_hud_strip(
+                dashboard, lower_y, speed_pct, err_val, curve_val,
+                l_state, conf, light_mode, esp_ok, esp_port,
+            )
 
+        # 5. Thanh trang thai UART & Phim tat duoi cung
+        self._draw_bottom_bar(dashboard, pkt)
+
+        # Xu ly su kien click chuot
         act = self._pending_action
         if act is not None:
             self._pending_action = None
-            if act == "switch_lane_cam":
+            if act == "quit_app":
+                state.running = False
+                return False
+            elif act == "switch_lane_cam":
                 cam_rig.switch_lane_camera()
             elif act == "switch_sign_cam":
                 cam_rig.switch_sign_camera()
@@ -533,6 +918,9 @@ class RobotDashboardUI:
             cv2.imshow(self.win_name, dashboard)
             key = cv2.waitKey(15) & 0xFF
             if key in (ord("q"), 27):
+                state.running = False
+                return False
+            if cv2.getWindowProperty(self.win_name, cv2.WND_PROP_VISIBLE) < 1:
                 state.running = False
                 return False
             if key == ord("c"):
