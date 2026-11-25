@@ -591,14 +591,14 @@ class RobotDashboardUI:
     def _draw_progress_bar(self, canvas, x, y, w, h, ratio, fill_col_start, fill_col_end):
         ratio = float(np.clip(ratio, 0.0, 1.0))
         _fill_rounded_rect(canvas, x, y, x + w, y + h, 4, BG_TRACK)
-        fill_w = int(round(w * ratio))
-        if fill_w > 2:
-            grad = np.zeros((h - 2, fill_w, 3), dtype=np.uint8)
-            t = np.linspace(0.0, 1.0, fill_w, dtype=np.float32).reshape(1, fill_w, 1)
+        draw_w = min(int(round(w * ratio)), max(0, w - 2))
+        if draw_w > 0:
+            grad = np.zeros((h - 2, draw_w, 3), dtype=np.uint8)
+            t = np.linspace(0.0, 1.0, draw_w, dtype=np.float32).reshape(1, draw_w, 1)
             c0 = np.array(fill_col_start, dtype=np.float32).reshape(1, 1, 3)
             c1 = np.array(fill_col_end, dtype=np.float32).reshape(1, 1, 3)
             grad[:] = (c0 * (1.0 - t) + c1 * t).astype(np.uint8)
-            canvas[y + 1:y + h - 1, x + 1:x + 1 + fill_w] = grad[:, :max(0, min(fill_w, w - 2))]
+            canvas[y + 1:y + h - 1, x + 1:x + 1 + draw_w] = grad
         _stroke_rounded_rect(canvas, x, y, x + w, y + h, 4, BORDER_SUB, 1)
 
     def _draw_bipolar_bar(self, canvas, x, y, w, h, val):

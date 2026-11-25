@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#111214" />
+  <title>XeTuHanh — Điều khiển</title>
+  <link rel="stylesheet" href="css/style.css?v=12" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <strong class="brand">XeTuHanh</strong>
+      <span class="sep">|</span>
+      <span class="conn-state offline" id="connState">
+        <span class="conn-dot"></span>
+        <span id="connText">Chưa kết nối xe</span>
+      </span>
+      <span class="sep">|</span>
+      <span class="muted" id="statusText">Đã dừng</span>
+    </div>
+
+    <div class="topbar-right">
+      <div class="seg" role="group" aria-label="Chế độ lái">
+        <button class="seg-btn active" data-drive="AUTO">Tự hành</button>
+        <button class="seg-btn" data-drive="MANUAL">Thủ công</button>
+      </div>
+      <button class="btn-run" id="btnPowerToggle" title="Bắt đầu / Kết thúc chạy xe (Space để Kết thúc)">Bắt đầu</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- CAMERA -->
+    <section class="cam-row">
+      <div class="panel cam-panel" id="panelCam1">
+        <div class="panel-head">
+          <span>Cam 1 — Làn đường (<span id="cam1Src">CSI</span>)</span>
+          <div class="head-actions">
+            <button class="btn-xs mobile-only" id="btnMobileCamToggle">Xem Cam 2</button>
+            <button class="btn-xs pc-only" id="btnSwitchCam1">Đổi nguồn</button>
+          </div>
+        </div>
+        <div class="video-wrap">
+          <img id="imgCam1" class="cam-stream hidden" alt="Cam 1" />
+          <canvas id="canvasCam1" width="480" height="240"></canvas>
+        </div>
+      </div>
+
+      <div class="panel cam-panel" id="panelCam2">
+        <div class="panel-head">
+          <span>Cam 2 — Biển báo (<span id="cam2Src">USB-0</span>)</span>
+          <div class="head-actions">
+            <button class="btn-xs pc-only" id="btnSwitchCam2">Đổi nguồn</button>
+            <button class="btn-xs pc-only" id="btnSwapCam">Hoán đổi</button>
+          </div>
+        </div>
+        <div class="video-wrap">
+          <img id="imgCam2" class="cam-stream hidden" alt="Cam 2" />
+          <canvas id="canvasCam2" width="480" height="270"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- ĐIỀU KHIỂN ĐUA XE & THÔNG SỐ -->
+    <section class="bottom-row">
+      <div class="panel ctrl-panel">
+        <div class="panel-head">
+          <span>Điều khiển</span>
+          <span class="muted pc-only">A/D: Rẽ · W/S: Tăng/Giảm tốc · Space: STOP</span>
+        </div>
+
+        <div class="ctrl-grid">
+          <div class="dpad" role="group" aria-label="Điều khiển hướng">
+            <button class="pad-btn pad-up" data-key="w" aria-label="Tăng tốc / Tiến">
+              <span class="pad-arrow">▲</span>
+              <span class="pad-key">W</span>
+            </button>
+            <button class="pad-btn pad-left" data-key="a" aria-label="Rẽ trái">
+              <span class="pad-arrow">◀</span>
+              <span class="pad-key">A</span>
+            </button>
+            <button class="pad-btn pad-stop" id="btnDpadStop" aria-label="Dừng">
+              <span class="pad-arrow">■</span>
+              <span class="pad-key">STOP</span>
+            </button>
+            <button class="pad-btn pad-right" data-key="d" aria-label="Rẽ phải">
+              <span class="pad-arrow">▶</span>
+              <span class="pad-key">D</span>
+            </button>
+            <button class="pad-btn pad-down" data-key="s" aria-label="Giảm tốc / Lùi">
+              <span class="pad-arrow">▼</span>
+              <span class="pad-key">S</span>
+            </button>
+          </div>
+
+          <div class="sliders">
+            <label class="field">
+              <span>Giới hạn tốc độ: <strong id="maxSpeedLabel">85%</strong></span>
+              <input type="range" id="sliderMaxSpeed" min="20" max="100" value="85" />
+            </label>
+            <label class="field">
+              <span>FOV Camera: <strong id="fovVal">100%</strong></span>
+              <input type="range" id="sliderFov" min="40" max="100" step="10" value="100" />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel info-panel">
+        <div class="panel-head">
+          <span>Thông số xe</span>
+          <code class="uart-code" id="uartPacket">&lt;75,+0.00,NORM&gt;</code>
+        </div>
+
+        <table class="info-table">
+          <tbody>
+            <tr><td>Tốc độ</td><td id="telSpeed">0%</td></tr>
+            <tr><td>Góc lái / Servo</td><td id="telSteer">+0.00 (90°)</td></tr>
+            <tr><td>Biển báo</td><td><div class="sign-list" id="kvSign"></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="js/app.js?v=12"></script>
+</body>
+</html>

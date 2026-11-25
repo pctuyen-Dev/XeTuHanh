@@ -11,12 +11,6 @@ except ImportError:
 
 
 class Esp32Controller:
-    """
-    Bo giao tiep tu Raspberry Pi 5 xuong ESP32 qua UART Serial (115200 bps).
-    Co co che TU DONG TIM CONG & TU DONG KET NOI LAI khi long day cap hoac vua cam nguon.
-    Gui goi tin dieu khien 4 banh & Servo theo dinh dang: <SPEED,ERROR,CMD>\n
-    """
-
     def __init__(self, port=None, baudrate=115200):
         self.ser = None
         self.preferred_port = port
