@@ -59,7 +59,7 @@ def _smoothstep(edge0, edge1, x):
 
 
 PRESET_ROBOT_TOY = {
-    "w_top": 55, "h_top": 52, "w_bot": 5, "h_bot": 228,
+    "w_top": 80, "h_top": 28, "w_bot": 22, "h_bot": 224,
     "hsv_range": (np.array([0, 0, 170]), np.array([179, 85, 255])),
 }
 
@@ -5771,6 +5771,13 @@ class LaneDetector:
         light_mode = lighting_info["mode"]
         roi_scope = "ROI-ONLY" if (restrict_roi or profile == "highway") else "WIDE-CORNER"
         if draw_overlay:
+            if points is not None:
+                pts_roi = np.asarray(points, dtype=np.int32)
+                if pts_roi.shape == (4, 2):
+                    poly_roi = np.array([pts_roi[0], pts_roi[1], pts_roi[3], pts_roi[2]], dtype=np.int32)
+                    cv2.polylines(img_result, [poly_roi], isClosed=True, color=(0, 255, 255), thickness=1, lineType=cv2.LINE_AA)
+                    for pr in pts_roi:
+                        cv2.circle(img_result, (int(pr[0]), int(pr[1])), 3, (0, 0, 255), cv2.FILLED, cv2.LINE_AA)
             if profile == "robot":
                 cv2.putText(
                     img_result,

@@ -14,6 +14,7 @@ if THIS_DIR not in sys.path:
     sys.path.insert(0, THIS_DIR)
 
 from LaneDetectionModule import LaneDetector, PRESET_ROBOT_TOY  # noqa: E402
+import utils  # noqa: E402
 
 
 def main():
@@ -28,12 +29,8 @@ def main():
         raise FileNotFoundError(f"Khong tim thay video: {args.video}")
 
     wT, hT = 480, 240
-    pts = np.float32([
-        (PRESET_ROBOT_TOY["w_top"], PRESET_ROBOT_TOY["h_top"]),
-        (wT - PRESET_ROBOT_TOY["w_top"], PRESET_ROBOT_TOY["h_top"]),
-        (PRESET_ROBOT_TOY["w_bot"], PRESET_ROBOT_TOY["h_bot"]),
-        (wT - PRESET_ROBOT_TOY["w_bot"], PRESET_ROBOT_TOY["h_bot"]),
-    ])
+    roi_cfg = utils.load_roi_config(wT=wT, hT=hT)
+    pts = utils.roi_cfg_to_points(roi_cfg, wT=wT, hT=hT)
     hsv_range = PRESET_ROBOT_TOY["hsv_range"]
 
     det_ai = LaneDetector(avg_window=6, use_ai=True)
@@ -49,16 +46,29 @@ def main():
         fps_in = cap.get(cv2.CAP_PROP_FPS) or 30.0
         writer = cv2.VideoWriter(args.save, cv2.VideoWriter_fourcc(*"mp4v"), fps_in, (wT * 2, hT))
 
-    win = "Test Lan Duong AI (Space: Pause | m: Doi AI/CV | r: Lai tu dau | q: Thoat)"
+    win = "Test Lan Duong AI (Space: Pause | m: Doi AI/CV | s: Luu ROI | r: Lai tu dau | q: Thoat)"
     if not args.no_gui:
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(win, wT * 2, hT * 2)
+        cv2.createTrackbar("W_Top", win, roi_cfg["w_top"], wT // 2 - 10, lambda _v: None)
+        cv2.createTrackbar("H_Top", win, roi_cfg["h_top"], hT - 30, lambda _v: None)
+        cv2.createTrackbar("W_Bot", win, roi_cfg["w_bot"], wT // 2 - 10, lambda _v: None)
+        cv2.createTrackbar("H_Bot", win, roi_cfg["h_bot"], hT - 1, lambda _v: None)
 
     paused = False
     idx = 0
     last_panel = None
 
     while True:
+        if not args.no_gui:
+            roi_cfg = utils.clamp_roi_cfg({
+                "w_top": cv2.getTrackbarPos("W_Top", win),
+                "h_top": cv2.getTrackbarPos("H_Top", win),
+                "w_bot": cv2.getTrackbarPos("W_Bot", win),
+                "h_bot": cv2.getTrackbarPos("H_Bot", win),
+            }, wT=wT, hT=hT)
+            pts = utils.roi_cfg_to_points(roi_cfg, wT=wT, hT=hT)
+
         if not paused:
             ok, frame = cap.read()
             if not ok:
@@ -79,6 +89,9 @@ def main():
             fps = 1000.0 / max(ms, 0.1)
 
             mask_bgr = cv2.cvtColor(img_thres, cv2.COLOR_GRAY2BGR)
+            pts_roi = np.asarray(pts, dtype=np.int32)
+            poly_roi = np.array([pts_roi[0], pts_roi[1], pts_roi[3], pts_roi[2]], dtype=np.int32)
+            cv2.polylines(mask_bgr, [poly_roi], isClosed=True, color=(0, 255, 255), thickness=1, lineType=cv2.LINE_AA)
             mode_tag = "AI: MobileNetV2-UNet" if det is det_ai and det_ai._ai_segmenter is not None else "CV: OpenCV"
             cv2.putText(mask_bgr, f"{mode_tag} | {ms:.1f}ms ({fps:.0f} FPS)", (8, 18),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
@@ -104,6 +117,9 @@ def main():
                 paused = not paused
             elif key == ord("m"):
                 use_ai_mode = not use_ai_mode
+            elif key == ord("s"):
+                saved_cfg = utils.save_roi_config(roi_cfg, wT=wT, hT=hT)
+                print(f"[ROI SAVED] {saved_cfg} -> {utils.ROI_CONFIG_PATH}")
             elif key == ord("r"):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 det_ai.reset()

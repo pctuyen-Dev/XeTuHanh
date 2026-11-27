@@ -53,6 +53,7 @@ for d in (BASE_DIR, P1_DIR, P2_DIR):
 
 import cameraModule
 from LaneDetectionModule import LaneDetector, PRESET_ROBOT_TOY
+import utils as lane_utils
 from MotorModule import Esp32Controller, decide_pi_to_esp32_command
 from RobotUI import RobotDashboardUI
 from web import server as web_server
@@ -87,6 +88,7 @@ class RobotSharedState:
 
         self.shared_cam = bool(shared_cam)
         self.cam_fov_pct = 100  # Mac dinh 100% = Full-FOV cua camera
+        self.roi_cfg = lane_utils.load_roi_config()
 
         # 2. Du lieu Lan duong (Luong T2 -> Luong T4 & GUI)
         self.lane_lock = threading.Lock()
@@ -230,12 +232,6 @@ def thread_1b_sign_camera(state: RobotSharedState, cam_rig: cameraModule.DualCam
 def thread_2_lane_perception(state: RobotSharedState, lane_size=(480, 240)):
     wT, hT = lane_size
     detector = LaneDetector(avg_window=6)
-    points = np.float32([
-        (PRESET_ROBOT_TOY["w_top"], PRESET_ROBOT_TOY["h_top"]),
-        (wT - PRESET_ROBOT_TOY["w_top"], PRESET_ROBOT_TOY["h_top"]),
-        (PRESET_ROBOT_TOY["w_bot"], PRESET_ROBOT_TOY["h_bot"]),
-        (wT - PRESET_ROBOT_TOY["w_bot"], PRESET_ROBOT_TOY["h_bot"]),
-    ])
     hsv_range = PRESET_ROBOT_TOY["hsv_range"]
 
     last_processed_id = -1
@@ -246,11 +242,13 @@ def thread_2_lane_perception(state: RobotSharedState, lane_size=(480, 240)):
         with state.cam_lock:
             fid = state.lane_frame_id
             frame = state.lane_latest_frame.copy() if (state.lane_latest_frame is not None and fid != last_processed_id) else None
+            roi_cfg = dict(state.roi_cfg)
 
         if frame is None:
             time.sleep(0.004)
             continue
 
+        points = lane_utils.roi_cfg_to_points(roi_cfg, wT=wT, hT=hT)
         last_processed_id = fid
         try:
             curve_val, _, img_thres, img_warp_vis, img_hist_combined, img_result = detector.process_frame(
@@ -521,6 +519,8 @@ def thread_5_web_bridge(state: RobotSharedState, cam_rig: cameraModule.DualCamer
                 state.web_max_speed = int(ctrl.get("max_speed", state.web_max_speed))
             with state.cam_lock:
                 state.cam_fov_pct = int(ctrl.get("fov_pct", state.cam_fov_pct))
+                if isinstance(ctrl.get("roi"), dict):
+                    state.roi_cfg = lane_utils.clamp_roi_cfg(ctrl["roi"])
 
             for act in ctrl.get("actions", ()):
                 if act == "switch_cam1":

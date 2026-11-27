@@ -1,6 +1,49 @@
 from functools import lru_cache
+import json
+import os
 import cv2
 import numpy as np
+
+ROI_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "roi_config.json")
+DEFAULT_ROI_CFG = {"w_top": 80, "h_top": 28, "w_bot": 22, "h_bot": 224}
+
+
+def clamp_roi_cfg(cfg, wT=480, hT=240):
+    w_top = max(0, min(wT // 2 - 10, int(cfg.get("w_top", DEFAULT_ROI_CFG["w_top"]))))
+    h_top = max(0, min(hT - 30, int(cfg.get("h_top", DEFAULT_ROI_CFG["h_top"]))))
+    w_bot = max(0, min(wT // 2 - 10, int(cfg.get("w_bot", DEFAULT_ROI_CFG["w_bot"]))))
+    h_bot = max(h_top + 20, min(hT - 1, int(cfg.get("h_bot", DEFAULT_ROI_CFG["h_bot"]))))
+    return {"w_top": w_top, "h_top": h_top, "w_bot": w_bot, "h_bot": h_bot}
+
+
+def load_roi_config(path=ROI_CONFIG_PATH, wT=480, hT=240):
+    cfg = dict(DEFAULT_ROI_CFG)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                cfg.update(data)
+        except Exception:
+            pass
+    return clamp_roi_cfg(cfg, wT=wT, hT=hT)
+
+
+def save_roi_config(cfg, path=ROI_CONFIG_PATH, wT=480, hT=240):
+    clean = clamp_roi_cfg(cfg, wT=wT, hT=hT)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(clean, f, indent=2)
+    return clean
+
+
+def roi_cfg_to_points(cfg, wT=480, hT=240):
+    c = clamp_roi_cfg(cfg, wT=wT, hT=hT)
+    return np.float32([
+        (c["w_top"], c["h_top"]),
+        (wT - c["w_top"], c["h_top"]),
+        (c["w_bot"], c["h_bot"]),
+        (wT - c["w_bot"], c["h_bot"]),
+    ])
 
 # Preallocated constants and LUT bases to avoid per-frame allocations in hot loops
 _LUT_BASE_F = np.arange(256, dtype=np.float32) / 255.0

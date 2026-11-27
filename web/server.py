@@ -7,9 +7,41 @@ import threading
 import time
 
 WEB_DIR = Path(__file__).resolve().parent
+ROOT_DIR = WEB_DIR.parent
+ROI_CONFIG_PATH = ROOT_DIR / "P1.NhanDienLanDuong" / "roi_config.json"
+DEFAULT_ROI = {"w_top": 80, "h_top": 28, "w_bot": 22, "h_bot": 224}
 PORT = 8080
 START_TIME = time.time()
 CAR_HEARTBEAT_TIMEOUT_S = 1.5
+
+
+def _clamp_roi(cfg):
+    w_top = max(0, min(230, int(cfg.get("w_top", DEFAULT_ROI["w_top"]))))
+    h_top = max(0, min(210, int(cfg.get("h_top", DEFAULT_ROI["h_top"]))))
+    w_bot = max(0, min(230, int(cfg.get("w_bot", DEFAULT_ROI["w_bot"]))))
+    h_bot = max(h_top + 20, min(239, int(cfg.get("h_bot", DEFAULT_ROI["h_bot"]))))
+    return {"w_top": w_top, "h_top": h_top, "w_bot": w_bot, "h_bot": h_bot}
+
+
+def _load_roi():
+    cfg = dict(DEFAULT_ROI)
+    if ROI_CONFIG_PATH.exists():
+        try:
+            data = json.loads(ROI_CONFIG_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                cfg.update(data)
+        except Exception:
+            pass
+    return _clamp_roi(cfg)
+
+
+def _save_roi(cfg):
+    clean = _clamp_roi(cfg)
+    try:
+        ROI_CONFIG_PATH.write_text(json.dumps(clean, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return clean
 
 
 class WebBridgeState:
@@ -24,6 +56,7 @@ class WebBridgeState:
         self.manual_steer = 0.0        # -1.0 .. +1.0
         self.max_speed = 85            # 20 .. 100
         self.fov_pct = 100             # 40 .. 100
+        self.roi = _load_roi()
         self.pending_actions = []      # ["switch_cam1", "switch_cam2", "swap_cams"]
 
         # Telemetry tu Xe -> Web
@@ -59,6 +92,7 @@ class WebBridgeState:
                 "manual_steer": self.manual_steer,
                 "max_speed": self.max_speed,
                 "fov_pct": self.fov_pct,
+                "roi": dict(self.roi),
                 "actions": actions,
             }
 
@@ -74,6 +108,7 @@ class WebBridgeState:
                 "drive_mode": self.drive_mode,
                 "max_speed": self.max_speed,
                 "fov_pct": self.fov_pct,
+                "roi": dict(self.roi),
                 "speed": self.speed if car_connected else 0,
                 "steer": self.steer if car_connected else 0.0,
                 "servo_deg": self.servo_deg if car_connected else 90,
@@ -102,6 +137,12 @@ class WebBridgeState:
                 self.max_speed = max(20, min(100, int(round(float(data["max_speed"])))))
             if "fov_pct" in data:
                 self.fov_pct = max(40, min(100, int(round(float(data["fov_pct"])))))
+            if "roi" in data and isinstance(data["roi"], dict):
+                merged = dict(self.roi)
+                for k in ("w_top", "h_top", "w_bot", "h_bot"):
+                    if k in data["roi"]:
+                        merged[k] = int(round(float(data["roi"][k])))
+                self.roi = _save_roi(merged)
             action = data.get("action")
             if action in ("switch_cam1", "switch_cam2", "swap_cams"):
                 self.pending_actions.append(action)

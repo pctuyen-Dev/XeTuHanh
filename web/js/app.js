@@ -8,6 +8,7 @@ const state = {
   cam2Src: "USB-0",
   fovPct: 100,
   maxSpeed: 85,
+  roi: { w_top: 80, h_top: 28, w_bot: 22, h_bot: 224 },
 
   keysPressed: new Set(),
 
@@ -49,6 +50,14 @@ const el = {
   maxSpeedLabel: document.getElementById("maxSpeedLabel"),
   sliderFov: document.getElementById("sliderFov"),
   fovVal: document.getElementById("fovVal"),
+  sliderRoiWTop: document.getElementById("sliderRoiWTop"),
+  roiWTopVal: document.getElementById("roiWTopVal"),
+  sliderRoiHTop: document.getElementById("sliderRoiHTop"),
+  roiHTopVal: document.getElementById("roiHTopVal"),
+  sliderRoiWBot: document.getElementById("sliderRoiWBot"),
+  roiWBotVal: document.getElementById("roiWBotVal"),
+  sliderRoiHBot: document.getElementById("sliderRoiHBot"),
+  roiHBotVal: document.getElementById("roiHBotVal"),
 
   telSpeed: document.getElementById("telSpeed"),
   telSteer: document.getElementById("telSteer"),
@@ -147,6 +156,18 @@ async function pollServerStatus() {
     const data = await res.json();
     updateConnectionUI(Boolean(data.server_online), Boolean(data.car_connected));
 
+    if (data.roi) {
+      state.roi = { ...state.roi, ...data.roi };
+      el.sliderRoiWTop.value = state.roi.w_top;
+      el.roiWTopVal.textContent = state.roi.w_top;
+      el.sliderRoiHTop.value = state.roi.h_top;
+      el.roiHTopVal.textContent = state.roi.h_top;
+      el.sliderRoiWBot.value = state.roi.w_bot;
+      el.roiWBotVal.textContent = state.roi.w_bot;
+      el.sliderRoiHBot.value = state.roi.h_bot;
+      el.roiHBotVal.textContent = state.roi.h_bot;
+    }
+
     if (data.car_connected) {
       if (typeof data.car_running === "boolean" && data.car_running !== state.carRunning) {
         setCarRunning(data.car_running, false);
@@ -199,6 +220,19 @@ el.sliderFov.addEventListener("input", (e) => {
   el.fovVal.textContent = `${state.fovPct}%`;
   sendControl({ fov_pct: state.fovPct });
 });
+
+function bindRoiSlider(slider, labelEl, key) {
+  slider.addEventListener("input", (e) => {
+    const val = Number(e.target.value);
+    state.roi[key] = val;
+    labelEl.textContent = val;
+    sendControl({ roi: { [key]: val } });
+  });
+}
+bindRoiSlider(el.sliderRoiWTop, el.roiWTopVal, "w_top");
+bindRoiSlider(el.sliderRoiHTop, el.roiHTopVal, "h_top");
+bindRoiSlider(el.sliderRoiWBot, el.roiWBotVal, "w_bot");
+bindRoiSlider(el.sliderRoiHBot, el.roiHBotVal, "h_bot");
 
 el.btnPowerToggle.addEventListener("click", () => setCarRunning(!state.carRunning));
 el.btnDpadStop.addEventListener("click", () => setCarRunning(false));
