@@ -87,13 +87,12 @@ _recovery_cooldown_until = 0.0
 # =============================================================================
 # CAU HINH TOC DO XE (PERCENT: 0 -> 100%) - TANG TOC VAO CUA THEO YEU CAU
 # =============================================================================
-SPEED_STRAIGHT = 90      # Toc do di thang NORM: chay rat nhanh (90%)
-SPEED_CURVE_MAX = 75     # Toc do khi vao cua nhe (75%) - da tang toc
-SPEED_CURVE_MIN = 58     # Toc do khi cua goc vua (58%) - da tang toc
-SPEED_FAR_CORNER = 75    # Nhin thay goc cua o xa: van chay nhanh 75%
-SPEED_APPROACH = 68      # DI THANG QUA DIEM MU 15CM voi toc do 68% (nhanh, khong bi cham)
-SPEED_SHARP_TURN = 60    # Toc do khi be lai cua gat 90 do (60% - da tang toc so voi 45%)
-SPEED_ONE_EDGE = 65      # Toc do khi xe bi lech chi con 1 vach (65%)
+SPEED_STRAIGHT = 100     # Toc do di thang NORM: toi da (100%)
+SPEED_CURVE_MAX = 100    # Toc do khi vao cua nhe: toi da (100%)
+SPEED_CURVE_MIN = 100    # Toc do khi cua goc vua: toi da (100%)
+SPEED_FAR_CORNER = 100   # Nhin thay goc cua o xa: toi da (100%)
+SPEED_SHARP_TURN = 100   # Toc do khi be lai cua gat 90 do: toi da (100%)
+SPEED_ONE_EDGE = 100     # Toc do khi xe bi lech chi con 1 vach: toi da (100%)
 
 # =============================================================================
 # CO CHE LUI PHUC HOI (K-TURN) KHI MAT VACH TAI GOC CUA:
@@ -109,13 +108,19 @@ REV_MAX_DURATION_S = 1.80
 REV_PWM = -100           # LUI MANH TOI DA (-100%)
 PAUSE_DURATION_S = 0.15
 FWD_TURN_DURATION_S = 0.65
-FWD_TURN_PWM = 60        # Tien be lai phuc hoi
+FWD_TURN_PWM = 72        # Tien be lai phuc hoi
 MAX_RECOVERY_TRIES = 2
-RECOVERY_MISSING_FRAMES_TRIGGER = 5
+RECOVERY_MISSING_FRAMES_TRIGGER = 8
 RECOVERY_COOLDOWN_S = 0.60
 RECOVERY_WINDOW_S = 7.0
 RECOVERY_OBS_CONFIRM_S = 0.15
 ON_LANE_RESET_S = 2.5
+SHARP_TURN_HOLD_S = 0.35
+
+_sharp_turn_latch = {
+    "dir": None,
+    "until": 0.0,
+}
 
 _recovery = {
     "phase": "IDLE",
@@ -142,6 +147,8 @@ def reset_recovery(cooldown_until=0.0):
         "obs_t0": None,
         "reacquired_in_rev": False,
     })
+    _sharp_turn_latch["dir"] = None
+    _sharp_turn_latch["until"] = 0.0
     _recovery_cooldown_until = cooldown_until
 
 
@@ -308,15 +315,28 @@ def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=Non
                 return rec_out
 
         # 2. BE LAI CUA GAT MANH TOI DA KHI XE TOI DIEM RE (turn_now == True)
+        raw_c = c
+        sharp_dir_now = None
         if turn_now and corner.get("confirmed") and corner_dir in ("LEFT", "RIGHT"):
-            c = -1.0 if corner_dir == "LEFT" else +1.0
+            sharp_dir_now = corner_dir
         elif turn_now and corner_cand in ("LEFT", "RIGHT") and (corner.get("consecutive_frames", 0) >= 2 or lane_state == "ONE_EDGE"):
-            c = -1.0 if corner_cand == "LEFT" else +1.0
+            sharp_dir_now = corner_cand
         elif turn_now and intent_dir in ("LEFT", "RIGHT") and lane_state == "ONE_EDGE":
-            c = -1.0 if intent_dir == "LEFT" else +1.0
-        elif dist_zone == "APPROACH" and corner_cand in ("LEFT", "RIGHT"):
-            # Cho phep bam tam muot trong khi tien sat khuc cua, tranh khoa cung lam xe giat
-            c = float(np.clip(c, -0.40, 0.40))
+            sharp_dir_now = intent_dir
+        elif lane_state == "ONE_EDGE" and abs(raw_c) >= 0.65:
+            sharp_dir_now = "RIGHT" if raw_c > 0 else "LEFT"
+
+        if sharp_dir_now in ("LEFT", "RIGHT"):
+            _sharp_turn_latch["dir"] = sharp_dir_now
+            _sharp_turn_latch["until"] = now + SHARP_TURN_HOLD_S
+            c = -1.0 if sharp_dir_now == "LEFT" else +1.0
+        elif _sharp_turn_latch["dir"] in ("LEFT", "RIGHT") and now < _sharp_turn_latch["until"]:
+            # Neu xe da thoat cua vao han hanh lang 2 vach thang -> nha giu lai som de khong bi qua da
+            if observed and lane_state == "TWO_EDGES" and abs(raw_c) < 0.22:
+                _sharp_turn_latch["dir"] = None
+                _sharp_turn_latch["until"] = 0.0
+            else:
+                c = -1.0 if _sharp_turn_latch["dir"] == "LEFT" else +1.0
         elif lane_state == "ONE_EDGE" and not turn_now:
             # Khi xe di lech 1 ben tren duong thang (chi thay 1 vach): dieu chinh em ve giua lan
             c = float(np.clip(c * 1.15, -0.65, 0.65))
@@ -324,9 +344,6 @@ def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=Non
         if abs(c) >= 0.55:
             cmd = "SHARP_R" if c > 0 else "SHARP_L"
             throttle_pwm = SPEED_SHARP_TURN
-        elif dist_zone == "APPROACH" and corner_cand in ("LEFT", "RIGHT"):
-            cmd = "APPROACH"
-            throttle_pwm = SPEED_APPROACH
         elif dist_zone == "FAR" and corner_cand in ("LEFT", "RIGHT"):
             cmd = "CURVE" if abs(c) >= 0.12 else "NORM"
             throttle_pwm = SPEED_FAR_CORNER
@@ -409,8 +426,6 @@ def simulate_motors(curve_val, detected_signs=None, sign_info_map=None, lane_inf
         direction = "GOC RE GAT PHAI (4WD Pivot)"
     elif cmd == "SHARP_L":
         direction = "GOC RE GAT TRAI (4WD Pivot)"
-    elif cmd == "APPROACH":
-        direction = "DI THANG QUA DIEM MU 15CM"
     elif c > 0.06:
         direction = f"GOC CUA PHAI (Servo {servo_angle} deg)"
     elif c < -0.06:

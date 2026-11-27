@@ -127,7 +127,7 @@ class RobotSharedState:
         self.web_drive_mode = "AUTO"
         self.web_manual_speed = 0
         self.web_manual_steer = 0.0
-        self.web_max_speed = 85
+        self.web_max_speed = 100
 
 
 def can_use_display():
@@ -250,10 +250,26 @@ def thread_2_lane_perception(state: RobotSharedState, lane_size=(480, 240)):
 
         points = lane_utils.roi_cfg_to_points(roi_cfg, wT=wT, hT=hT)
         last_processed_id = fid
+
+        now_j = time.time()
+        with state.sign_lock:
+            sign_fresh = (state.sign_time > 0.0) and ((now_j - state.sign_time) <= 0.50)
+            active_signs = list(state.detected_signs) if sign_fresh else []
+
+        junction_intent = "STRAIGHT"
+        if active_signs:
+            primary_cls = max(active_signs, key=lambda d: d[3] * d[4])[0]
+            if primary_cls == "right":
+                junction_intent = "RIGHT"
+            elif primary_cls == "left":
+                junction_intent = "LEFT"
+            elif primary_cls == "no_straight":
+                junction_intent = None
+
         try:
             curve_val, _, img_thres, img_warp_vis, img_hist_combined, img_result = detector.process_frame(
                 frame, points, hsv_range=hsv_range, use_dual_edge=True, profile="robot",
-                fresh_observation=True, restrict_roi=True
+                fresh_observation=True, restrict_roi=True, junction_intent=junction_intent
             )
             det_info = dict(detector.last_detection)
             now = time.time()
@@ -562,8 +578,12 @@ def run_robot():
             print(f"[WARNING] Khong nap duoc model YOLO11n ({e}). Tiep tuc chay bam lan.")
 
     lane_cam_idx = _parse_int_arg(("--lane-cam", "--cam"))
+    if lane_cam_idx is None:
+        lane_cam_idx = 1
     sign_cam_idx = _parse_int_arg(("--sign-cam",))
-    force_shared_cam = "--shared-cam" in sys.argv
+    if sign_cam_idx is None:
+        sign_cam_idx = lane_cam_idx
+    force_shared_cam = "--dual-cam" not in sys.argv
 
     lane_size = (480, 240)
     sign_size = (480, 320)

@@ -125,8 +125,6 @@ class LaneDetector:
         self._intent_turn_ttl = 0
         self._intent_turn_ttl_s = 0.0
         self._straight_clear_hits = 0
-        self._blind_spot_wait_frames = 0
-        self._blind_spot_wait_s = 0.0
         self._prev_light_mode = None
         self._last_obs_time = None
         self._last_dt_s = 1.0 / 15.0
@@ -3452,8 +3450,6 @@ class LaneDetector:
                 })
                 self._smooth_center_pts = None
             if self._intent_turn_dir in ("LEFT", "RIGHT") and candidate != self._intent_turn_dir:
-                self._blind_spot_wait_s = 0.0
-                self._blind_spot_wait_frames = 0
                 self._active_turn_hold_s = 0.0
                 self._active_turn_hold = 0
             self._intent_turn_dir = candidate
@@ -3467,8 +3463,6 @@ class LaneDetector:
                     self._intent_turn_dir = "UNKNOWN"
                     self._intent_turn_ttl_s = 0.0
                     self._intent_turn_ttl = 0
-                    self._blind_spot_wait_s = 0.0
-                    self._blind_spot_wait_frames = 0
                     self.corner_memory["active"] = False
                     self.corner_memory["direction"] = "UNKNOWN"
                     self.corner_memory["ttl"] = 0
@@ -3519,21 +3513,19 @@ class LaneDetector:
                 mean_ground_turn_deg = mean_turn_deg
 
             is_single_edge = len(self.observed_boundaries) == 1
-            if fresh_observation:
-                if elbow_y_ratio >= 0.55:
-                    self._blind_spot_wait_s += dt_step
-                elif elbow_y_ratio < 0.38:
-                    self._blind_spot_wait_s = 0.0
-                self._blind_spot_wait_frames = int(round(self._blind_spot_wait_s * 15.0))
-
-            blind_spot_cleared = (self._blind_spot_wait_s >= 0.38 and mean_turn_deg >= 30.0) or (
-                elbow_y_ratio >= 0.72 and mean_turn_deg >= 38.0 and (both_agree or self._corner_hits >= 2 or not fresh_observation)
+            corner_ready = (mean_turn_deg >= 30.0) and (both_agree or self._corner_hits >= 2 or not fresh_observation)
+            single_edge_sharp_ready = (
+                is_single_edge
+                and elbow_y_ratio >= 0.50
+                and mean_turn_deg >= 55.0
+                and (self._corner_hits >= 2 or not fresh_observation)
             )
 
             if (
-                (elbow_y_ratio >= 0.65 and blind_spot_cleared)
-                or (elbow_y_ratio >= 0.55 and stem_span_y <= h * 0.12 and blind_spot_cleared)
-                or (is_single_edge and min_start_y < h * 0.68 and blind_spot_cleared)
+                (elbow_y_ratio >= 0.55 and corner_ready)
+                or (elbow_y_ratio >= 0.50 and stem_span_y <= h * 0.12 and corner_ready)
+                or (is_single_edge and min_start_y < h * 0.68 and corner_ready)
+                or single_edge_sharp_ready
             ):
                 distance_zone = "TURN_NOW"
                 turn_now = True
@@ -3561,7 +3553,7 @@ class LaneDetector:
                 and min_start_y < h * 0.62
             ):
                 # Giua goc cua: than vach doc da troi qua mep duoi -> khong duoc roi ve FAR
-                if is_single_edge and (min_start_y < h * 0.50 or blind_spot_cleared):
+                if is_single_edge and (min_start_y < h * 0.50 or corner_ready):
                     distance_zone = "TURN_NOW"
                     turn_now = True
                     confirmed = True
@@ -3626,8 +3618,6 @@ class LaneDetector:
                 self._active_turn_hold_s = 0.0
                 self._active_turn_hold = 0
                 self._active_turn_dir = "UNKNOWN"
-                self._blind_spot_wait_s = 0.0
-                self._blind_spot_wait_frames = 0
 
         return {
             "direction": candidate if confirmed else "UNKNOWN",

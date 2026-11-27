@@ -54,7 +54,7 @@ class WebBridgeState:
         self.drive_mode = "AUTO"       # "AUTO" | "MANUAL"
         self.manual_speed = 0          # -100 .. 100
         self.manual_steer = 0.0        # -1.0 .. +1.0
-        self.max_speed = 85            # 20 .. 100
+        self.max_speed = 100           # 20 .. 100
         self.fov_pct = 100             # 40 .. 100
         self.roi = _load_roi()
         self.pending_actions = []      # ["switch_cam1", "switch_cam2", "swap_cams"]
