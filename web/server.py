@@ -1,9 +1,3 @@
-"""
-server.py - May chu Web luon chay (0.0.0.0:8080), phuc vu giao dien,
-luong MJPEG 2 camera va dong bo trang thai/lenh dieu khien voi RobotMain.py.
-Chay doc lap: python web/server.py
-"""
-
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -19,8 +13,6 @@ CAR_HEARTBEAT_TIMEOUT_S = 1.5
 
 
 class WebBridgeState:
-    """Bo nho chia se giua Web UI va RobotMain.py."""
-
     def __init__(self):
         self.lock = threading.Lock()
         self.last_car_heartbeat = 0.0

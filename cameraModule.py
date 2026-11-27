@@ -1,14 +1,3 @@
-"""
-cameraModule.py - Quan ly Camera da backend cho Raspberry Pi 5 (CSI) & PC (USB).
-
-Luon khoi dong o goc nhin rong nhat chuan (100% Full-FOV):
-  1. Picamera2 (CSI): chon sensor mode Full-FOV (binned) + main stream cung ty le khung
-     cam bien + ScalerCrop = toan bo cam bien (tranh bi libcamera tu crop hai ben).
-  2. GStreamer (libcamerasrc): yeu cau khung 4:3 full-FOV truoc khi resize.
-  3. rpicam-vid / libcamera-vid MJPEG pipe: ep --roi 0,0,1,1 de giu toan bo cam bien.
-  4. USB / V4L2 / DirectShow (Webcam): uu tien MJPG 16:9 (1280x720 -> 1920x1080 -> 800x448 -> 640x360)
-     va tat Zoom/Pan/Tilt de lay tron ven goc nhin rong nhat cua cam bien, fallback 640x480 (4:3).
-"""
 
 import os
 import shutil
@@ -511,7 +500,7 @@ class DualCameraRig:
         self._sign_size = (480, 320)
 
     def boot(self, lane_size=(480, 240), sign_size=(480, 320),
-             lane_idx=None, sign_idx=None, max_retries=5, retry_delay=1.5):
+             lane_idx=None, sign_idx=None, max_retries=5, retry_delay=1.5, force_shared=False):
         self._lane_size = tuple(lane_size)
         self._sign_size = tuple(sign_size)
 
@@ -529,10 +518,10 @@ class DualCameraRig:
         lane_is_csi = self.lane_cam._active_backend in ("picamera2", "rpicam_pipe")
         exclude = [lane_usb] if lane_usb is not None else []
 
-        # Neu nguoi dung ep --sign-cam trung voi --lane-cam -> dung chung 1 cam
-        if sign_idx is not None and lane_usb is not None and sign_idx == lane_usb:
+        # Neu ep --shared-cam hoac --sign-cam trung voi --lane-cam -> dung chung 1 cam
+        if force_shared or (sign_idx is not None and lane_usb is not None and sign_idx == lane_usb):
             self.shared_mode = True
-            print(f"[DUAL-CAM] Cam Bien bao dung chung Cam Lan ({self.lane_cam.get_label()}).")
+            print(f"[DUAL-CAM] Che do dung chung 1 Camera ({self.lane_cam.get_label()}) cho ca Lan duong & Bien bao.")
             return True
 
         print("[DUAL-CAM] Dang do tim Camera thu 2 cho Nhan dien Bien bao (YOLO11n)...")

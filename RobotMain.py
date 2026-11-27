@@ -254,7 +254,8 @@ def thread_2_lane_perception(state: RobotSharedState, lane_size=(480, 240)):
         last_processed_id = fid
         try:
             curve_val, _, img_thres, img_warp_vis, img_hist_combined, img_result = detector.process_frame(
-                frame, points, hsv_range=hsv_range, use_dual_edge=True, profile="robot", fresh_observation=True
+                frame, points, hsv_range=hsv_range, use_dual_edge=True, profile="robot",
+                fresh_observation=True, restrict_roi=True
             )
             det_info = dict(detector.last_detection)
             now = time.time()
@@ -562,6 +563,7 @@ def run_robot():
 
     lane_cam_idx = _parse_int_arg(("--lane-cam", "--cam"))
     sign_cam_idx = _parse_int_arg(("--sign-cam",))
+    force_shared_cam = "--shared-cam" in sys.argv
 
     lane_size = (480, 240)
     sign_size = (480, 320)
@@ -573,6 +575,7 @@ def run_robot():
         sign_idx=sign_cam_idx,
         max_retries=5,
         retry_delay=1.5,
+        force_shared=force_shared_cam,
     ):
         esp32.stop()
         print("[AUTO-FIX] Dang cho Camera san sang (kiem tra cap CSI / USB)... Thu lai sau 3 giay.")
