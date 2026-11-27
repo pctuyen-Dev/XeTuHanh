@@ -85,37 +85,39 @@ _recent_recovery_times = []
 _recovery_cooldown_until = 0.0
 
 # =============================================================================
-# CAU HINH TOC DO XE (PERCENT: 0 -> 100%) - TANG TOC VAO CUA THEO YEU CAU
+# CAU HINH TOC DO XE (PERCENT: 0 -> 100%) - GIAM TOC VAO CUA DE KHONG BI VANG LAN
 # =============================================================================
-SPEED_STRAIGHT = 100     # Toc do di thang NORM: toi da (100%)
-SPEED_CURVE_MAX = 100    # Toc do khi vao cua nhe: toi da (100%)
-SPEED_CURVE_MIN = 100    # Toc do khi cua goc vua: toi da (100%)
-SPEED_FAR_CORNER = 100   # Nhin thay goc cua o xa: toi da (100%)
-SPEED_SHARP_TURN = 100   # Toc do khi be lai cua gat 90 do: toi da (100%)
-SPEED_ONE_EDGE = 100     # Toc do khi xe bi lech chi con 1 vach: toi da (100%)
+SPEED_STRAIGHT = 90      # Toc do di thang NORM: 90% giup bam giua lan on dinh tren bat bong
+SPEED_CURVE_MAX = 82     # Toc do khi vao cua nhe
+SPEED_CURVE_MIN = 64     # Toc do khi cua goc vua
+SPEED_FAR_CORNER = 72    # Nhin thay goc cua o xa: giam toc som de chuan bi re gon
+SPEED_SHARP_TURN = 58    # Toc do khi be lai cua gat 90 do (giam truot banh, tranh vang rong)
+SPEED_ONE_EDGE = 68      # Toc do khi xe chi con 1 vach
 
 # =============================================================================
 # CO CHE LUI PHUC HOI (K-TURN) KHI MAT VACH TAI GOC CUA:
-#   PRE_REV  : Dung banh + xoay servo het co ve huong nguoc cua (vd: cua phai -> xoay trai het co 30 do)
-#   REVERSE  : Lui MANH (-100%) dut khoat 1.0s - 1.8s (neu thay lai 2 vach ro rang sau 1.0s -> dung lui som)
+#   PRE_REV  : Dung banh + xoay servo het co ve huong nguoc cua (vd: cua phai -> xoay trai het co)
+#   REVERSE  : Lui vua du (0.85s - 1.80s) de dua dau xe tro lai vao lan ma khong lui lo sau
+#              (chi dung lui som sau 0.85s neu thay lai 2 vach ro rang; neu chi 1 vach -> toi thieu 1.25s)
 #   PAUSE    : Dung ngan (0.15s) truoc khi chuyen sang tien
-#   FWD_TURN : Tien + be lai vao cua toi da 0.65s; chi thoat khi thay vach on dinh >= 0.15s
+#   FWD_TURN : Tien + be lai vao cua toi da 0.85s; chi thoat som khi thay 2 vach hoac sau >= 0.35s on dinh
 #   Toi da MAX_RECOVERY_TRIES = 2 lan trong 1 khuc cua (chong tinh trang lui-tien-lui-tien nhieu lan)
 # =============================================================================
 PRE_REV_DURATION_S = 0.22
-REV_MIN_DURATION_S = 1.00
-REV_MAX_DURATION_S = 1.80
-REV_PWM = -100           # LUI MANH TOI DA (-100%)
+REV_MIN_DURATION_S = 1.45
+REV_ONE_EDGE_EXIT_S = 2.25
+REV_MAX_DURATION_S = 2.75
+REV_PWM = -96            # Lui du luc va du thoi gian de xoay du goc vao lan
 PAUSE_DURATION_S = 0.15
-FWD_TURN_DURATION_S = 0.65
+FWD_TURN_DURATION_S = 0.85
 FWD_TURN_PWM = 72        # Tien be lai phuc hoi
 MAX_RECOVERY_TRIES = 2
-RECOVERY_MISSING_FRAMES_TRIGGER = 8
+RECOVERY_MISSING_FRAMES_TRIGGER = 6
 RECOVERY_COOLDOWN_S = 0.60
 RECOVERY_WINDOW_S = 7.0
 RECOVERY_OBS_CONFIRM_S = 0.15
 ON_LANE_RESET_S = 2.5
-SHARP_TURN_HOLD_S = 0.35
+SHARP_TURN_HOLD_S = 0.18
 
 _sharp_turn_latch = {
     "dir": None,
@@ -161,7 +163,7 @@ def _update_obs_confirm(cond, now, required_s):
     return False
 
 
-def _run_recovery(observed, lane_state, now):
+def _run_recovery(observed, lane_state, now, e_norm=0.0):
     """Tra ve (speed, err, cmd, text) neu dang trong chu trinh lui phuc hoi, nguoc lai tra ve None."""
     phase = _recovery["phase"]
     rec_dir = _recovery["dir"]
@@ -180,7 +182,9 @@ def _run_recovery(observed, lane_state, now):
     if phase == "REVERSE":
         reacquired = False
         if dt >= REV_MIN_DURATION_S:
-            cond = bool(observed and (lane_state == "TWO_EDGES" or dt >= 1.35))
+            two_edges_aligned = (lane_state == "TWO_EDGES" and abs(float(e_norm)) < 0.70)
+            one_edge_aligned = (dt >= 1.75 and abs(float(e_norm)) < 0.55)
+            cond = bool(observed and (two_edges_aligned or one_edge_aligned or dt >= REV_ONE_EDGE_EXIT_S))
             reacquired = _update_obs_confirm(cond, now, RECOVERY_OBS_CONFIRM_S)
         if not reacquired and dt < REV_MAX_DURATION_S:
             remain = REV_MAX_DURATION_S - dt
@@ -204,7 +208,8 @@ def _run_recovery(observed, lane_state, now):
         phase, dt = "FWD_TURN", 0.0
 
     if phase == "FWD_TURN":
-        if _update_obs_confirm(bool(observed), now, RECOVERY_OBS_CONFIRM_S):
+        fwd_ready = bool(observed and (lane_state == "TWO_EDGES" or dt >= 0.35))
+        if _update_obs_confirm(fwd_ready, now, RECOVERY_OBS_CONFIRM_S):
             # Da thay lai vach on dinh -> tra quyen dieu khien ve bam lan binh thuong
             reset_recovery(cooldown_until=now + RECOVERY_COOLDOWN_S)
             return None
@@ -234,6 +239,176 @@ def _run_recovery(observed, lane_state, now):
     return None
 
 
+def resolve_sign_directives(detected_signs, sign_info_map=None):
+    """Tong hop danh sach bien bao dong thoi (vd: DiThang + CamRePhai, CamDiThang + RePhai)
+    thanh chi thi nhat quan cho ca Luong 2 (bam lan/nga 3) va Luong 4 (dieu khien dong co).
+    """
+    if not detected_signs:
+        return {
+            "junction_intent": "AUTO",
+            "primary_cls": None,
+            "action_text": "",
+            "speed_factor": 1.0,
+            "steer_bias": 0.0,
+            "force_turn_dir": None,
+            "forbid_straight": False,
+            "forbid_right": False,
+            "forbid_left": False,
+            "stop_now": False,
+        }
+
+    cls_best = {}
+    for det in detected_signs:
+        cls_name = det[0]
+        area = float(det[3]) * float(det[4])
+        if cls_name not in cls_best or area > cls_best[cls_name][0]:
+            cls_best[cls_name] = (area, det)
+
+    cls_set = set(cls_best.keys())
+
+    # 1. Bien bao dung khan cap luon co do uu tien cao nhat
+    if "stop" in cls_set or "no_entry" in cls_set:
+        p_cls = "stop" if "stop" in cls_set else "no_entry"
+        info = (sign_info_map or {}).get(p_cls, {})
+        return {
+            "junction_intent": None,
+            "primary_cls": p_cls,
+            "action_text": info.get("action", "DUNG - STOP"),
+            "speed_factor": 0.0,
+            "steer_bias": 0.0,
+            "force_turn_dir": None,
+            "forbid_straight": True,
+            "forbid_right": False,
+            "forbid_left": False,
+            "stop_now": True,
+        }
+
+    has_straight = "straight" in cls_set
+    has_right = "right" in cls_set
+    has_left = "left" in cls_set
+    has_no_straight = "no_straight" in cls_set
+    has_no_right = "no_right" in cls_set
+    has_no_left = "no_left" in cls_set
+
+    # Tinh he so toc do thap nhat tu cac bien han che toc do / canh bao di kem (neu co)
+    aux_speed_factor = 1.0
+    if sign_info_map:
+        for c_name in cls_set:
+            if c_name in ("straight", "right", "left", "no_straight", "no_right", "no_left"):
+                continue
+            s_info = sign_info_map.get(c_name)
+            if s_info and s_info.get("speed_factor", 1.0) > 0.0:
+                aux_speed_factor = min(aux_speed_factor, float(s_info["speed_factor"]))
+
+    # 2. Truong hop uu tien RE PHAI:
+    #    - Co bien 'right' (ke ca di kem 'no_straight': Cam di thang + Re phai -> Re phai)
+    #    - Hoac 'no_straight' + 'no_left' (khong co 'no_right')
+    if (has_right and not has_no_right) or (has_no_straight and has_no_left and not has_no_right and not has_left):
+        if has_no_straight and has_right:
+            act_txt = "CAM DI THANG -> RE PHAI"
+        elif has_no_straight and has_no_left:
+            act_txt = "CAM DI THANG + CAM RE TRAI -> RE PHAI"
+        else:
+            act_txt = ((sign_info_map or {}).get("right") or {}).get("action", "RE PHAI")
+        base_spd = 0.80 if has_no_straight else 0.85
+        return {
+            "junction_intent": "RIGHT",
+            "primary_cls": "right" if has_right else "no_straight",
+            "action_text": act_txt,
+            "speed_factor": min(base_spd, aux_speed_factor),
+            "steer_bias": 0.45 if has_right else 0.35,
+            "force_turn_dir": "RIGHT",
+            "forbid_straight": has_no_straight,
+            "forbid_right": False,
+            "forbid_left": has_no_left,
+            "stop_now": False,
+        }
+
+    # 3. Truong hop uu tien RE TRAI:
+    #    - Co bien 'left' (ke ca di kem 'no_straight': Cam di thang + Re trai -> Re trai)
+    #    - Hoac 'no_straight' + 'no_right' (khong co 'no_left')
+    if (has_left and not has_no_left) or (has_no_straight and has_no_right and not has_no_left and not has_right):
+        if has_no_straight and has_left:
+            act_txt = "CAM DI THANG -> RE TRAI"
+        elif has_no_straight and has_no_right:
+            act_txt = "CAM DI THANG + CAM RE PHAI -> RE TRAI"
+        else:
+            act_txt = ((sign_info_map or {}).get("left") or {}).get("action", "RE TRAI")
+        base_spd = 0.80 if has_no_straight else 0.85
+        return {
+            "junction_intent": "LEFT",
+            "primary_cls": "left" if has_left else "no_straight",
+            "action_text": act_txt,
+            "speed_factor": min(base_spd, aux_speed_factor),
+            "steer_bias": -0.45 if has_left else -0.35,
+            "force_turn_dir": "LEFT",
+            "forbid_straight": has_no_straight,
+            "forbid_right": has_no_right,
+            "forbid_left": False,
+            "stop_now": False,
+        }
+
+    # 4. Truong hop DI THANG & KHONG RE PHAI/TRAI:
+    #    - Co 'straight' va/hoac 'no_right' / 'no_left' (khong co 'no_straight')
+    if (has_straight or has_no_right or has_no_left) and not has_no_straight:
+        if has_straight and has_no_right:
+            act_txt = "DI THANG (CAM RE PHAI)"
+        elif has_straight and has_no_left:
+            act_txt = "DI THANG (CAM RE TRAI)"
+        elif has_straight:
+            act_txt = ((sign_info_map or {}).get("straight") or {}).get("action", "DI THANG")
+        elif has_no_right:
+            act_txt = "CAM RE PHAI (DI THANG)"
+        else:
+            act_txt = "CAM RE TRAI (DI THANG)"
+        base_spd = 1.00 if has_straight else 0.90
+        return {
+            "junction_intent": "STRAIGHT",
+            "primary_cls": "straight" if has_straight else ("no_right" if has_no_right else "no_left"),
+            "action_text": act_txt,
+            "speed_factor": min(base_spd, aux_speed_factor),
+            "steer_bias": 0.0,  # Khong cong bias lech lan khi da bam duong thang qua nga 3
+            "force_turn_dir": None,
+            "forbid_straight": False,
+            "forbid_right": has_no_right,
+            "forbid_left": has_no_left,
+            "stop_now": False,
+        }
+
+    # 5. Chi co 'no_straight' don le (khong thay bien re phai/trai di kem)
+    if has_no_straight:
+        info = (sign_info_map or {}).get("no_straight", {})
+        return {
+            "junction_intent": None,
+            "primary_cls": "no_straight",
+            "action_text": info.get("action", "CAM DI THANG"),
+            "speed_factor": min(float(info.get("speed_factor", 0.50)), aux_speed_factor),
+            "steer_bias": 0.0,
+            "force_turn_dir": None,
+            "forbid_straight": True,
+            "forbid_right": has_no_right,
+            "forbid_left": has_no_left,
+            "stop_now": False,
+        }
+
+    # 6. Cac bien bao khac (toc do, cong truong, canh bao...): chon bien co dien tich bbox lon nhat
+    primary = max(detected_signs, key=lambda d: d[3] * d[4])
+    cls_name = primary[0]
+    info = (sign_info_map or {}).get(cls_name) or {}
+    return {
+        "junction_intent": "AUTO",
+        "primary_cls": cls_name,
+        "action_text": info.get("action", cls_name),
+        "speed_factor": float(info.get("speed_factor", 1.0)),
+        "steer_bias": float(info.get("steer_bias", 0.0)),
+        "force_turn_dir": None,
+        "forbid_straight": False,
+        "forbid_right": False,
+        "forbid_left": False,
+        "stop_now": False,
+    }
+
+
 def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=None, lane_info=None):
     """
     Tong hop tin hieu Lan duong (curve_val, lane_info tu Luong 2) va Bien bao (detected_signs tu Luong 3)
@@ -246,9 +421,9 @@ def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=Non
     global _last_known_turn_dir, _last_corner_dir_time, _on_lane_since
 
     # Do nhay lai da duoc can chinh theo PD + goc huong BEV tu LaneDetector
-    STEER_GAIN = 1.12
+    STEER_GAIN = 1.15
     c = float(np.clip(curve_val * STEER_GAIN, -1.0, 1.0))
-    if abs(c) < 0.03:
+    if abs(c) < 0.02:
         c = 0.0
 
     sign_override_text = ""
@@ -310,20 +485,29 @@ def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=Non
                 _recovery["reacquired_in_rev"] = False
                 _set_recovery_phase("PRE_REV", now)
         if _recovery["phase"] != "IDLE":
-            rec_out = _run_recovery(observed, lane_state, now)
+            e_norm_rec = float(lane_info.get("center_offset_norm", 0.0))
+            rec_out = _run_recovery(observed, lane_state, now, e_norm=e_norm_rec)
             if rec_out is not None:
                 return rec_out
 
-        # 2. BE LAI CUA GAT MANH TOI DA KHI XE TOI DIEM RE (turn_now == True)
+        # 2. BE LAI CUA GAT MANH TOI DA KHI XE THUC SU TOI DIEM RE (tranh cua som khi c nho / con TWO_EDGES)
         raw_c = c
         sharp_dir_now = None
-        if turn_now and corner.get("confirmed") and corner_dir in ("LEFT", "RIGHT"):
-            sharp_dir_now = corner_dir
-        elif turn_now and corner_cand in ("LEFT", "RIGHT") and (corner.get("consecutive_frames", 0) >= 2 or lane_state == "ONE_EDGE"):
-            sharp_dir_now = corner_cand
-        elif turn_now and intent_dir in ("LEFT", "RIGHT") and lane_state == "ONE_EDGE":
-            sharp_dir_now = intent_dir
-        elif lane_state == "ONE_EDGE" and abs(raw_c) >= 0.65:
+        dir_cand = (
+            corner_dir if corner_dir in ("LEFT", "RIGHT")
+            else (corner_cand if corner_cand in ("LEFT", "RIGHT") else intent_dir)
+        )
+        dir_cand_sgn = 1.0 if dir_cand == "RIGHT" else (-1.0 if dir_cand == "LEFT" else 0.0)
+        if turn_now and dir_cand in ("LEFT", "RIGHT"):
+            if (
+                lane_state == "ONE_EDGE"
+                and (corner.get("confirmed") or corner.get("consecutive_frames", 0) >= 2)
+                and (raw_c * dir_cand_sgn >= -0.05)
+            ):
+                sharp_dir_now = dir_cand
+            elif corner.get("confirmed") and (raw_c * dir_cand_sgn >= 0.45):
+                sharp_dir_now = dir_cand
+        elif lane_state == "ONE_EDGE" and abs(raw_c) >= 0.72:
             sharp_dir_now = "RIGHT" if raw_c > 0 else "LEFT"
 
         if sharp_dir_now in ("LEFT", "RIGHT"):
@@ -332,7 +516,7 @@ def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=Non
             c = -1.0 if sharp_dir_now == "LEFT" else +1.0
         elif _sharp_turn_latch["dir"] in ("LEFT", "RIGHT") and now < _sharp_turn_latch["until"]:
             # Neu xe da thoat cua vao han hanh lang 2 vach thang -> nha giu lai som de khong bi qua da
-            if observed and lane_state == "TWO_EDGES" and abs(raw_c) < 0.22:
+            if observed and lane_state == "TWO_EDGES" and abs(raw_c) < 0.25:
                 _sharp_turn_latch["dir"] = None
                 _sharp_turn_latch["until"] = 0.0
             else:
@@ -341,7 +525,7 @@ def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=Non
             # Khi xe di lech 1 ben tren duong thang (chi thay 1 vach): dieu chinh em ve giua lan
             c = float(np.clip(c * 1.15, -0.65, 0.65))
 
-        if abs(c) >= 0.55:
+        if abs(c) >= 0.78:
             cmd = "SHARP_R" if c > 0 else "SHARP_L"
             throttle_pwm = SPEED_SHARP_TURN
         elif dist_zone == "FAR" and corner_cand in ("LEFT", "RIGHT"):
@@ -352,12 +536,12 @@ def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=Non
             throttle_pwm = SPEED_ONE_EDGE
         elif abs(c) >= 0.10:
             cmd = "CURVE"
-            throttle_pwm = int(round(np.clip((0.82 - 0.28 * abs(c)) * 100, SPEED_CURVE_MIN, SPEED_CURVE_MAX)))
+            throttle_pwm = int(round(np.clip((0.82 - 0.22 * abs(c)) * 100, SPEED_CURVE_MIN, SPEED_CURVE_MAX)))
         else:
             cmd = "NORM"
             throttle_pwm = SPEED_STRAIGHT
     else:
-        if abs(c) >= 0.55:
+        if abs(c) >= 0.78:
             cmd = "SHARP_R" if c > 0 else "SHARP_L"
             throttle_pwm = SPEED_SHARP_TURN
         elif abs(c) >= 0.10:
@@ -367,26 +551,55 @@ def decide_pi_to_esp32_command(curve_val, detected_signs=None, sign_info_map=Non
             cmd = "NORM"
             throttle_pwm = SPEED_STRAIGHT
 
-    if detected_signs and sign_info_map:
-        primary = max(detected_signs, key=lambda d: d[3] * d[4])
-        cls_name = primary[0]
-        info = sign_info_map.get(cls_name)
-        if info:
-            sign_override_text = info["action"]
-            spd_factor = info["speed_factor"]
-            steer_bias = info["steer_bias"]
+    if detected_signs:
+        directives = resolve_sign_directives(detected_signs, sign_info_map)
+        sign_override_text = directives["action_text"]
+        spd_factor = directives["speed_factor"]
+        steer_bias = directives["steer_bias"]
+        force_dir = directives["force_turn_dir"]
 
-            if spd_factor == 0.0:
-                return 0, 0.0, "STOP", f"BIEN BAO: {sign_override_text}"
+        if directives["stop_now"] or spd_factor == 0.0:
+            return 0, 0.0, "STOP", f"BIEN BAO: {sign_override_text}"
 
+        if force_dir in ("RIGHT", "LEFT"):
+            j_info = (lane_info.get("junction") or {}) if lane_info else {}
+            c_info = (lane_info.get("corner") or {}) if lane_info else {}
+            dir_sgn = 1.0 if force_dir == "RIGHT" else -1.0
+            turn_ready = (
+                (lane_info is None)
+                or (j_info.get("phase") == "AT_JUNCTION")
+                or bool(c_info.get("turn_now", False))
+                or (lane_info.get("lane_state") == "ONE_EDGE")
+                or (not lane_info.get("observed", True))
+                or (c * dir_sgn >= 0.35)
+            )
+            if turn_ready:
+                throttle_pwm = max(52, int(round(throttle_pwm * spd_factor)))
+                c = float(np.clip(c + steer_bias, -1.0, 1.0))
+                if force_dir == "RIGHT":
+                    c = max(c, 0.60)
+                    cmd = "SIGN_R"
+                else:
+                    c = min(c, -0.60)
+                    cmd = "SIGN_L"
+            else:
+                # Con o doan duong thang truoc mieng nga 3: giam toc chuan bi re, khong be lai som truoc giao lo
+                throttle_pwm = int(round(throttle_pwm * min(spd_factor, 0.78)))
+        else:
             throttle_pwm = int(round(throttle_pwm * spd_factor))
             if abs(steer_bias) > 0.01:
                 c = float(np.clip(c + steer_bias, -1.0, 1.0))
-            if cls_name == "left":
-                cmd = "SIGN_L"
-            elif cls_name == "right":
-                cmd = "SIGN_R"
-            elif spd_factor < 0.75:
+            if directives["forbid_right"] and directives["junction_intent"] == "STRAIGHT":
+                if c > 0.40:
+                    c = 0.40
+                if cmd in ("SHARP_R", "SIGN_R"):
+                    cmd = "CURVE"
+            elif directives["forbid_left"] and directives["junction_intent"] == "STRAIGHT":
+                if c < -0.40:
+                    c = -0.40
+                if cmd in ("SHARP_L", "SIGN_L"):
+                    cmd = "CURVE"
+            if spd_factor < 0.75 and cmd not in ("SHARP_L", "SHARP_R"):
                 cmd = "SLOW"
 
     return throttle_pwm, c, cmd, sign_override_text

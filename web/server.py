@@ -3,13 +3,21 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import socket
+import sys
 import threading
 import time
+from urllib.parse import unquote
 
 WEB_DIR = Path(__file__).resolve().parent
 ROOT_DIR = WEB_DIR.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+import BlackBoxModule
+
+BLACKBOX_DIR = ROOT_DIR / "blackbox_logs"
 ROI_CONFIG_PATH = ROOT_DIR / "P1.NhanDienLanDuong" / "roi_config.json"
-DEFAULT_ROI = {"w_top": 80, "h_top": 28, "w_bot": 22, "h_bot": 224}
+DEFAULT_ROI = {"w_top": 123, "h_top": 105, "w_bot": 5, "h_bot": 222}
 PORT = 8080
 START_TIME = time.time()
 CAR_HEARTBEAT_TIMEOUT_S = 1.5
@@ -58,6 +66,8 @@ class WebBridgeState:
         self.fov_pct = 100             # 40 .. 100
         self.roi = _load_roi()
         self.pending_actions = []      # ["switch_cam1", "switch_cam2", "swap_cams"]
+        self.blackbox_auto = True
+        self.blackbox_manual = False
 
         # Telemetry tu Xe -> Web
         self.esp32_connected = False
@@ -69,6 +79,14 @@ class WebBridgeState:
         self.cam1_src = "CSI"
         self.cam2_src = "USB-0"
         self.signs = []
+        self.blackbox = {
+            "recording": False,
+            "session_id": None,
+            "duration_s": 0.0,
+            "ticks": 0,
+            "frames": 0,
+            "anomalies": 0,
+        }
 
         # Frame JPEG moi nhat cua 2 Camera
         self.cam1_jpeg = None
@@ -94,7 +112,25 @@ class WebBridgeState:
                 "fov_pct": self.fov_pct,
                 "roi": dict(self.roi),
                 "actions": actions,
+                "blackbox_auto": self.blackbox_auto,
+                "blackbox_manual": self.blackbox_manual,
             }
+
+    def get_blackbox_status(self):
+        now = time.time()
+        with self.lock:
+            car_connected = (now - self.last_car_heartbeat) <= CAR_HEARTBEAT_TIMEOUT_S
+            bb = dict(self.blackbox) if car_connected else {
+                "recording": False,
+                "session_id": None,
+                "duration_s": 0.0,
+                "ticks": 0,
+                "frames": 0,
+                "anomalies": 0,
+            }
+            bb["blackbox_auto"] = self.blackbox_auto
+            bb["blackbox_manual"] = self.blackbox_manual
+            return bb
 
     def get_public_status(self):
         now = time.time()
@@ -117,6 +153,16 @@ class WebBridgeState:
                 "cam1_src": self.cam1_src,
                 "cam2_src": self.cam2_src,
                 "signs": list(self.signs) if car_connected else [],
+                "blackbox_auto": self.blackbox_auto,
+                "blackbox_manual": self.blackbox_manual,
+                "blackbox": dict(self.blackbox) if car_connected else {
+                    "recording": False,
+                    "session_id": None,
+                    "duration_s": 0.0,
+                    "ticks": 0,
+                    "frames": 0,
+                    "anomalies": 0,
+                },
                 "uptime_s": round(now - START_TIME, 1),
             }
 
@@ -143,6 +189,10 @@ class WebBridgeState:
                     if k in data["roi"]:
                         merged[k] = int(round(float(data["roi"][k])))
                 self.roi = _save_roi(merged)
+            if "blackbox_auto" in data:
+                self.blackbox_auto = bool(data["blackbox_auto"])
+            if "blackbox_manual" in data:
+                self.blackbox_manual = bool(data["blackbox_manual"])
             action = data.get("action")
             if action in ("switch_cam1", "switch_cam2", "swap_cams"):
                 self.pending_actions.append(action)
@@ -159,6 +209,12 @@ class WebBridgeState:
             self.cam1_src = str(telemetry.get("cam1_src", self.cam1_src))
             self.cam2_src = str(telemetry.get("cam2_src", self.cam2_src))
             self.signs = list(telemetry.get("signs", []))
+            if isinstance(telemetry.get("blackbox"), dict):
+                self.blackbox = dict(telemetry["blackbox"])
+            if "blackbox_auto" in telemetry:
+                self.blackbox_auto = bool(telemetry["blackbox_auto"])
+            if "blackbox_manual" in telemetry:
+                self.blackbox_manual = bool(telemetry["blackbox_manual"])
 
         if cam1_jpeg is not None or cam2_jpeg is not None:
             with self.cam_cond:
@@ -192,6 +248,16 @@ class RobotWebHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_bytes(self, code, content_type, data_bytes, extra_headers=None):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data_bytes)))
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data_bytes)
+
     def _stream_mjpeg(self, cam_idx):
         self.send_response(200)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -224,6 +290,50 @@ class RobotWebHandler(SimpleHTTPRequestHandler):
         if path == "/api/status":
             self._send_json(200, BRIDGE.get_public_status())
             return
+        if path == "/api/blackbox/sessions":
+            self._send_json(200, {
+                "ok": True,
+                "status": BRIDGE.get_blackbox_status(),
+                "sessions": BlackBoxModule.list_sessions(BLACKBOX_DIR),
+            })
+            return
+        if path.startswith("/api/blackbox/session/"):
+            rest = unquote(path[len("/api/blackbox/session/"):]).strip("/")
+            parts = [p for p in rest.split("/") if p]
+            if len(parts) == 1:
+                sid = parts[0]
+                try:
+                    data = BlackBoxModule.load_session(sid, BLACKBOX_DIR)
+                    self._send_json(200, {"ok": True, **data})
+                except FileNotFoundError:
+                    self._send_json(404, {"ok": False, "error": "Khong tim thay phien"})
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            if len(parts) == 2 and parts[1] == "export":
+                sid = parts[0]
+                try:
+                    zbytes = BlackBoxModule.build_session_zip_bytes(sid, BLACKBOX_DIR)
+                    self._send_bytes(
+                        200, "application/zip", zbytes,
+                        extra_headers={"Content-Disposition": f'attachment; filename="{sid}.zip"'},
+                    )
+                except FileNotFoundError:
+                    self._send_json(404, {"ok": False, "error": "Khong tim thay phien"})
+                except ValueError as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            if len(parts) == 3 and parts[1] == "frame":
+                sid, fname = parts[0], parts[2]
+                if not (BlackBoxModule.is_safe_name(sid) and BlackBoxModule.is_safe_name(fname)):
+                    self._send_json(400, {"ok": False, "error": "Invalid path"})
+                    return
+                fpath = BLACKBOX_DIR / sid / "frames" / fname
+                if not fpath.is_file():
+                    self._send_json(404, {"ok": False, "error": "Frame not found"})
+                    return
+                self._send_bytes(200, "image/jpeg", fpath.read_bytes())
+                return
         if path == "/stream/cam1.mjpg":
             self._stream_mjpeg(1)
             return
@@ -231,6 +341,23 @@ class RobotWebHandler(SimpleHTTPRequestHandler):
             self._stream_mjpeg(2)
             return
         super().do_GET()
+
+    def do_DELETE(self):
+        path = self.path.split("?", 1)[0]
+        if path.startswith("/api/blackbox/session/"):
+            sid = unquote(path[len("/api/blackbox/session/"):]).strip("/")
+            active_sid = BRIDGE.get_blackbox_status().get("session_id")
+            try:
+                BlackBoxModule.delete_session(sid, active_session_id=active_sid, base_dir=BLACKBOX_DIR)
+                self._send_json(200, {"ok": True})
+            except RuntimeError as exc:
+                self._send_json(409, {"ok": False, "error": str(exc)})
+            except FileNotFoundError:
+                self._send_json(404, {"ok": False, "error": "Khong tim thay phien"})
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+        self._send_json(404, {"error": "Not found"})
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
@@ -245,6 +372,32 @@ class RobotWebHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self._send_json(400, {"ok": False, "error": str(exc)})
             return
+
+        if path.startswith("/api/blackbox/session/"):
+            rest = unquote(path[len("/api/blackbox/session/"):]).strip("/")
+            parts = [p for p in rest.split("/") if p]
+            if len(parts) == 2 and parts[1] == "note":
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                    meta = BlackBoxModule.save_session_note(parts[0], data.get("notes", ""), BLACKBOX_DIR)
+                    self._send_json(200, {"ok": True, "meta": meta})
+                except FileNotFoundError:
+                    self._send_json(404, {"ok": False, "error": "Khong tim thay phien"})
+                except Exception as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            if len(parts) == 2 and parts[1] == "delete":
+                active_sid = BRIDGE.get_blackbox_status().get("session_id")
+                try:
+                    BlackBoxModule.delete_session(parts[0], active_session_id=active_sid, base_dir=BLACKBOX_DIR)
+                    self._send_json(200, {"ok": True})
+                except RuntimeError as exc:
+                    self._send_json(409, {"ok": False, "error": str(exc)})
+                except FileNotFoundError:
+                    self._send_json(404, {"ok": False, "error": "Khong tim thay phien"})
+                except Exception as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                return
 
         if path == "/internal/sync":
             try:
@@ -263,7 +416,7 @@ class RobotWebHandler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         if args:
             msg = str(args[0])
-            if any(k in msg for k in ("/api/status", "/api/control", "/internal/sync", "/stream/")):
+            if any(k in msg for k in ("/api/status", "/api/control", "/internal/sync", "/stream/", "/api/blackbox/")):
                 return
         super().log_message(format, *args)
 

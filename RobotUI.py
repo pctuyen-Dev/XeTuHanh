@@ -415,7 +415,7 @@ class RobotDashboardUI:
                 self._txt.draw(canvas, "|", px - 5, sub_y, size=12, color=BORDER_DIM)
                 px += 4
 
-    def _draw_toolbar(self, canvas, lane_cam_lbl, sign_cam_lbl, fov_pct, lane_cam_ok, sign_cam_ok):
+    def _draw_toolbar(self, canvas, lane_cam_lbl, sign_cam_lbl, fov_pct, lane_cam_ok, sign_cam_ok, bb_status=None):
         y1 = self.HEADER_H + 5
         y2 = self.HEADER_H + self.TOOL_H - 5
 
@@ -474,6 +474,20 @@ class RobotDashboardUI:
             bg=_pill_bg("toggle_mode", tinted=not self.detail_mode),
             border=COL_TINT_BORDER if not self.detail_mode else BORDER_BTN,
             text_color=COL_BLUE if not self.detail_mode else TXT_WHITE,
+        )
+        x = b_mode[2] + 8
+
+        bb_rec = bool((bb_status or {}).get("recording", False))
+        bb_dur = float((bb_status or {}).get("duration_s", 0.0))
+        b_bb = (x, y1, x + 150, y2)
+        self._buttons["toggle_blackbox"] = b_bb
+        bb_lbl = f"REC {bb_dur:.0f}s [B]" if bb_rec else "Hộp đen [B]"
+        self._draw_button(
+            canvas, b_bb, bb_lbl,
+            bg=(48, 28, 72) if bb_rec else _pill_bg("toggle_blackbox"),
+            border=COL_RED if bb_rec else BORDER_BTN,
+            text_color=TXT_WHITE, bold=bb_rec,
+            icon="dot", icon_color=COL_RED if bb_rec else TXT_MUTED,
         )
 
         # Nut tat he thong
@@ -747,7 +761,7 @@ class RobotDashboardUI:
         pkt_col = COL_RED if is_stop else COL_GREEN
         self._txt.draw(canvas, f"UART: {pkt}", self.PAD_X + 34, y1 + 10, size=14, color=pkt_col, bold=True)
 
-        keys_txt = "[C] Cam1    [V] Cam2    [X] Hoán đổi    [+/-] FOV    [D] Chế độ    [Q] Thoát"
+        keys_txt = "[C] Cam1   [V] Cam2   [X] Hoán đổi   [+/-] FOV   [D] Chế độ   [B] Hộp đen   [Q] Thoát"
         self._txt.draw(canvas, keys_txt, self.TOTAL_W - self.PAD_X, y1 + 11,
                        size=13, color=TXT_SOFT, align="right")
 
@@ -799,6 +813,7 @@ class RobotDashboardUI:
             sign_action = state.last_sign_action
             esp_ok = bool(getattr(state, "esp32_connected", False))
             esp_port = str(getattr(state, "esp32_port", ""))
+            bb_status = dict(getattr(state, "blackbox_status", {}) or {})
 
         # Ve bounding box bien bao len khung hinh Cam 2
         sign_vis = raw_sign_frame.copy() if raw_sign_frame is not None else (
@@ -830,7 +845,7 @@ class RobotDashboardUI:
         self._draw_header(dashboard, l_cam_fps, s_cam_fps, l_fps, s_fps)
 
         # 2. Thanh cong cu dieu khien
-        self._draw_toolbar(dashboard, lane_cam_lbl, sign_cam_lbl, fov_pct, lane_cam_ok, sign_cam_ok or shared_cam)
+        self._draw_toolbar(dashboard, lane_cam_lbl, sign_cam_lbl, fov_pct, lane_cam_ok, sign_cam_ok or shared_cam, bb_status=bb_status)
 
         # 3. Hang 2 Camera
         cam_y = self.HEADER_H + self.TOOL_H + self.GAP
@@ -913,6 +928,10 @@ class RobotDashboardUI:
                     state.cam_fov_pct = 100
             elif act == "toggle_mode":
                 self.detail_mode = not self.detail_mode
+            elif act == "toggle_blackbox":
+                with state.ctrl_lock:
+                    if hasattr(state, "blackbox_manual"):
+                        state.blackbox_manual = not state.blackbox_manual
 
         try:
             cv2.imshow(self.win_name, dashboard)
@@ -933,6 +952,10 @@ class RobotDashboardUI:
                 cam_rig.swap_cameras()
             elif key == ord("d"):
                 self.detail_mode = not self.detail_mode
+            elif key == ord("b"):
+                with state.ctrl_lock:
+                    if hasattr(state, "blackbox_manual"):
+                        state.blackbox_manual = not state.blackbox_manual
             elif key in (ord("-"), ord("_")):
                 with state.cam_lock:
                     state.cam_fov_pct = max(40, state.cam_fov_pct - 10)

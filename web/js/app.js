@@ -1,4 +1,5 @@
 const state = {
+  activeTab: "live",
   mobileCamIndex: 1,
   driveMode: "AUTO",
   carRunning: false,
@@ -8,7 +9,10 @@ const state = {
   cam2Src: "USB-0",
   fovPct: 100,
   maxSpeed: 85,
-  roi: { w_top: 80, h_top: 28, w_bot: 22, h_bot: 224 },
+  roi: { w_top: 123, h_top: 105, w_bot: 5, h_bot: 222 },
+  blackboxAuto: true,
+  blackboxManual: false,
+  blackboxRecording: false,
 
   keysPressed: new Set(),
 
@@ -68,6 +72,48 @@ const el = {
   cCam2: document.getElementById("canvasCam2"),
   imgCam1: document.getElementById("imgCam1"),
   imgCam2: document.getElementById("imgCam2"),
+
+  tabBtns: document.querySelectorAll("[data-tab]"),
+  liveView: document.getElementById("liveView"),
+  blackboxView: document.getElementById("blackboxView"),
+  bbTopPill: document.getElementById("bbTopPill"),
+  bbTopText: document.getElementById("bbTopText"),
+  btnBbRec: document.getElementById("btnBbRec"),
+  chkBbAuto: document.getElementById("chkBbAuto"),
+  bbStatusMsg: document.getElementById("bbStatusMsg"),
+  btnBbRefresh: document.getElementById("btnBbRefresh"),
+  bbSessionCount: document.getElementById("bbSessionCount"),
+  bbSessionList: document.getElementById("bbSessionList"),
+  bbEmptyDetail: document.getElementById("bbEmptyDetail"),
+  bbDetailWrap: document.getElementById("bbDetailWrap"),
+  bbDetailTitle: document.getElementById("bbDetailTitle"),
+  bbDetailMeta: document.getElementById("bbDetailMeta"),
+  btnBbExport: document.getElementById("btnBbExport"),
+  btnBbDelete: document.getElementById("btnBbDelete"),
+  btnBbToggleRaw: document.getElementById("btnBbToggleRaw"),
+  bbImgCam1: document.getElementById("bbImgCam1"),
+  bbImgWarp: document.getElementById("bbImgWarp"),
+  bbImgCam2: document.getElementById("bbImgCam2"),
+  bbNoCam1: document.getElementById("bbNoCam1"),
+  bbNoWarp: document.getElementById("bbNoWarp"),
+  bbNoCam2: document.getElementById("bbNoCam2"),
+  bbChart: document.getElementById("bbChart"),
+  btnBbFirst: document.getElementById("btnBbFirst"),
+  btnBbPrev: document.getElementById("btnBbPrev"),
+  btnBbPlay: document.getElementById("btnBbPlay"),
+  btnBbNext: document.getElementById("btnBbNext"),
+  btnBbLast: document.getElementById("btnBbLast"),
+  bbSpeedSelect: document.getElementById("bbSpeedSelect"),
+  bbTimeLabel: document.getElementById("bbTimeLabel"),
+  bbTickLabel: document.getElementById("bbTickLabel"),
+  btnBbNextAnomaly: document.getElementById("btnBbNextAnomaly"),
+  bbCurPacket: document.getElementById("bbCurPacket"),
+  bbTelemetryGrid: document.getElementById("bbTelemetryGrid"),
+  bbAnomalyCount: document.getElementById("bbAnomalyCount"),
+  bbAnomalyList: document.getElementById("bbAnomalyList"),
+  bbNotesInput: document.getElementById("bbNotesInput"),
+  bbNoteSavedMsg: document.getElementById("bbNoteSavedMsg"),
+  btnBbSaveNote: document.getElementById("btnBbSaveNote"),
 };
 
 function syncMobileCam() {
@@ -186,6 +232,26 @@ async function pollServerStatus() {
       el.uartPacket.textContent = data.packet || "<0,+0.00,STOP>";
       renderDetectedSigns(data.signs || []);
     }
+
+    if (typeof data.blackbox_auto === "boolean") {
+      state.blackboxAuto = data.blackbox_auto;
+      el.chkBbAuto.checked = data.blackbox_auto;
+    }
+    if (typeof data.blackbox_manual === "boolean") {
+      state.blackboxManual = data.blackbox_manual;
+      el.btnBbRec.classList.toggle("active", data.blackbox_manual);
+      el.btnBbRec.textContent = data.blackbox_manual ? "Dừng ghi" : "Ghi Hộp đen";
+    }
+    const bb = data.blackbox || {};
+    const prevRec = state.blackboxRecording;
+    state.blackboxRecording = Boolean(data.car_connected && bb.recording);
+    el.bbTopPill.classList.toggle("hidden", !state.blackboxRecording);
+    if (state.blackboxRecording) {
+      el.bbTopText.textContent = `REC ${Number(bb.duration_s || 0).toFixed(0)}s`;
+    }
+    if (prevRec && !state.blackboxRecording && state.activeTab === "blackbox") {
+      loadBlackBoxSessions();
+    }
   } catch {
     updateConnectionUI(false, false);
   }
@@ -250,7 +316,26 @@ function syncPads() {
 }
 
 window.addEventListener("keydown", (e) => {
+  const tag = (e.target && e.target.tagName) || "";
+  if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") {
+    return;
+  }
   const k = e.key.toLowerCase();
+
+  if (state.activeTab === "blackbox") {
+    if (k === " ") {
+      e.preventDefault();
+      toggleBbPlay();
+    } else if (k === "arrowleft") {
+      e.preventDefault();
+      stepBbIndex(-1);
+    } else if (k === "arrowright") {
+      e.preventDefault();
+      stepBbIndex(1);
+    }
+    return;
+  }
+
   if (k === " ") {
     e.preventDefault();
     setCarRunning(false);
@@ -322,6 +407,30 @@ function drawCam1(ctx, w, h, curve) {
   ctx.lineTo(w * 0.5 + shift * 0.5, h * 0.32);
   ctx.stroke();
   ctx.setLineDash([]);
+
+  // Ve khung ROI vang (dong bo 480x240)
+  const rxTop = (state.roi.w_top / 480) * w;
+  const ryTop = (state.roi.h_top / 240) * h;
+  const rxBot = (state.roi.w_bot / 480) * w;
+  const ryBot = (state.roi.h_bot / 240) * h;
+  const roiPts = [
+    [rxTop, ryTop],
+    [w - rxTop, ryTop],
+    [w - rxBot, ryBot],
+    [rxBot, ryBot],
+  ];
+  ctx.strokeStyle = "#facc15";
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  roiPts.forEach(([px, py], i) => (i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py)));
+  ctx.closePath();
+  ctx.stroke();
+  ctx.fillStyle = "#ef4444";
+  roiPts.forEach(([px, py]) => {
+    ctx.beginPath();
+    ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.fill();
+  });
 
   if (!state.carConnected) {
     ctx.fillStyle = "rgba(17, 18, 20, 0.72)";
@@ -458,3 +567,454 @@ function tick(now) {
 }
 
 requestAnimationFrame(tick);
+
+// ============================================================================
+// HOP DEN (BLACK BOX REPLAY & DIAGNOSTICS)
+// ============================================================================
+const bbState = {
+  sessions: [],
+  currentId: null,
+  meta: null,
+  telemetry: [],
+  anomalies: [],
+  index: 0,
+  playing: false,
+  speed: 1,
+  showRawCam1: false,
+  playTimer: null,
+};
+
+function escHtml(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function switchTab(tab) {
+  state.activeTab = tab;
+  el.tabBtns.forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  el.liveView.classList.toggle("hidden", tab !== "live");
+  el.blackboxView.classList.toggle("hidden", tab !== "blackbox");
+  if (tab === "blackbox") {
+    loadBlackBoxSessions();
+  } else {
+    stopBbPlay();
+  }
+}
+
+el.tabBtns.forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+
+el.btnBbRec.addEventListener("click", () => {
+  const next = !state.blackboxManual;
+  state.blackboxManual = next;
+  el.btnBbRec.classList.toggle("active", next);
+  el.btnBbRec.textContent = next ? "Dừng ghi" : "Ghi Hộp đen";
+  sendControl({ blackbox_manual: next });
+});
+
+el.chkBbAuto.addEventListener("change", (e) => {
+  state.blackboxAuto = e.target.checked;
+  sendControl({ blackbox_auto: state.blackboxAuto });
+});
+
+el.btnBbRefresh.addEventListener("click", () => loadBlackBoxSessions());
+
+async function loadBlackBoxSessions() {
+  try {
+    el.bbStatusMsg.textContent = "Đang tải...";
+    const res = await fetch("/api/blackbox/sessions", { cache: "no-store" });
+    const data = await res.json();
+    bbState.sessions = data.sessions || [];
+    el.bbSessionCount.textContent = bbState.sessions.length;
+    el.bbStatusMsg.textContent = "";
+    renderSessionList();
+    if (!bbState.currentId && bbState.sessions.length > 0) {
+      selectSession(bbState.sessions[0].session_id);
+    }
+  } catch {
+    el.bbStatusMsg.textContent = "Không tải được danh sách hộp đen";
+  }
+}
+
+function renderSessionList() {
+  if (!bbState.sessions.length) {
+    el.bbSessionList.innerHTML = '<div class="bb-empty">Chưa có lần đi nào được ghi lại.</div>';
+    return;
+  }
+  el.bbSessionList.innerHTML = bbState.sessions.map((s) => {
+    const sm = s.summary || {};
+    const anom = Number(sm.anomalies_count || 0);
+    const badgeCls = anom === 0 ? "ok" : (anom <= 3 ? "warn" : "bad");
+    const badgeTxt = anom === 0 ? "Ổn" : `${anom} sự cố`;
+    const active = s.session_id === bbState.currentId ? " active" : "";
+    const noteDot = s.notes ? " · Có ghi chú" : "";
+    return `
+      <div class="bb-session-item${active}" data-sid="${escHtml(s.session_id)}">
+        <div class="bb-sess-top">
+          <span>${escHtml(s.session_id)}</span>
+          <span class="bb-badge ${badgeCls}">${badgeTxt}</span>
+        </div>
+        <div class="bb-sess-sub">
+          <span>${Number(s.duration_s || 0).toFixed(1)}s · ${sm.frames || 0} ảnh</span>
+          <span>${escHtml((s.config && s.config.drive_mode_initial) || "AUTO")}${noteDot}</span>
+        </div>
+      </div>`;
+  }).join("");
+
+  el.bbSessionList.querySelectorAll(".bb-session-item").forEach((item) => {
+    item.addEventListener("click", () => selectSession(item.dataset.sid));
+  });
+}
+
+async function selectSession(sid) {
+  stopBbPlay();
+  bbState.currentId = sid;
+  renderSessionList();
+  try {
+    el.bbStatusMsg.textContent = `Đang mở ${sid}...`;
+    const res = await fetch(`/api/blackbox/session/${encodeURIComponent(sid)}`, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    bbState.meta = data.meta || {};
+    bbState.telemetry = data.telemetry || [];
+    bbState.anomalies = data.anomalies || [];
+    bbState.index = 0;
+
+    el.bbEmptyDetail.classList.add("hidden");
+    el.bbDetailWrap.classList.remove("hidden");
+    el.bbDetailTitle.textContent = sid;
+
+    const cfg = bbState.meta.config || {};
+    const roi = cfg.roi || {};
+    el.bbDetailMeta.textContent =
+      ` · ${Number(bbState.meta.duration_s || 0).toFixed(1)}s · ${bbState.telemetry.length} ticks` +
+      (cfg.fov_pct ? ` · FOV ${cfg.fov_pct}%` : "") +
+      (roi.w_top !== undefined ? ` · ROI(${roi.w_top},${roi.h_top},${roi.w_bot},${roi.h_bot})` : "");
+
+    el.bbNotesInput.value = bbState.meta.notes || "";
+    el.bbNoteSavedMsg.textContent = "";
+    renderAnomalies();
+    renderBbAtIndex(0);
+    el.bbStatusMsg.textContent = "";
+  } catch {
+    el.bbStatusMsg.textContent = "Lỗi đọc dữ liệu phiên";
+  }
+}
+
+function renderAnomalies() {
+  const list = bbState.anomalies;
+  el.bbAnomalyCount.textContent = list.length;
+  if (!list.length) {
+    el.bbAnomalyList.innerHTML = '<div class="bb-empty">Không phát hiện sự cố bất thường.</div>';
+    return;
+  }
+  el.bbAnomalyList.innerHTML = list.map((a, i) => `
+    <div class="bb-anomaly-row" data-seq="${Number(a.seq || 0)}" data-idx="${i}">
+      <span class="bb-anomaly-t">${Number(a.t || 0).toFixed(2)}s</span>
+      <span class="bb-badge warn">${escHtml(a.type)}</span>
+      <span>${escHtml(a.desc)}</span>
+    </div>`).join("");
+
+  el.bbAnomalyList.querySelectorAll(".bb-anomaly-row").forEach((rowEl) => {
+    rowEl.addEventListener("click", () => {
+      const seq = Number(rowEl.dataset.seq);
+      const idx = bbState.telemetry.findIndex((r) => Number(r.seq) >= seq);
+      if (idx >= 0) {
+        stopBbPlay();
+        renderBbAtIndex(idx);
+      }
+    });
+  });
+}
+
+function setBbFrameImg(imgEl, noEl, fname) {
+  if (fname && bbState.currentId) {
+    const url = `/api/blackbox/session/${encodeURIComponent(bbState.currentId)}/frame/${encodeURIComponent(fname)}`;
+    if (imgEl.dataset.curUrl !== url) {
+      imgEl.dataset.curUrl = url;
+      imgEl.src = url;
+    }
+    imgEl.classList.remove("hidden");
+    noEl.classList.add("hidden");
+  } else {
+    imgEl.removeAttribute("src");
+    imgEl.dataset.curUrl = "";
+    imgEl.classList.add("hidden");
+    noEl.classList.remove("hidden");
+  }
+}
+
+function renderBbAtIndex(idx) {
+  const tel = bbState.telemetry;
+  if (!tel.length) {
+    el.bbTimeLabel.textContent = "0.00s / 0.00s";
+    el.bbTickLabel.textContent = "Tick 0 / 0";
+    el.bbTelemetryGrid.innerHTML = "";
+    drawBbChart();
+    return;
+  }
+  bbState.index = Math.max(0, Math.min(tel.length - 1, idx));
+  const row = tel[bbState.index];
+  const totalT = Number(tel[tel.length - 1].t || 0);
+
+  el.bbTimeLabel.textContent = `${Number(row.t || 0).toFixed(2)}s / ${totalT.toFixed(2)}s`;
+  el.bbTickLabel.textContent = `Tick ${bbState.index + 1} / ${tel.length}`;
+  el.bbCurPacket.textContent = row.packet || "<0,+0.00,STOP>";
+
+  const imgs = row.resolved_imgs || {};
+  const c1File = bbState.showRawCam1 ? (imgs.r1 || imgs.c1) : (imgs.c1 || imgs.r1);
+  setBbFrameImg(el.bbImgCam1, el.bbNoCam1, c1File);
+  setBbFrameImg(el.bbImgWarp, el.bbNoWarp, imgs.wp);
+  setBbFrameImg(el.bbImgCam2, el.bbNoCam2, imgs.c2);
+
+  const lane = row.lane || {};
+  const corner = lane.corner || {};
+  const junc = lane.junction || {};
+  const ctrl = lane.ctrl || {};
+  const signsTxt = (row.signs && row.signs.length)
+    ? row.signs.map((s) => `${s.name}(${Math.round((s.conf || 0) * 100)}%)`).join(", ")
+    : "Không";
+
+  const pairs = [
+    ["Chế độ / Lệnh", `${row.mode || "-"} / ${row.cmd || "-"}`],
+    ["Tốc độ / Servo", `${row.speed ?? 0}% / ${row.servo ?? 90}°`],
+    ["Err / Curve", `${Number(row.err || 0).toFixed(2)} / ${Number(row.curve || 0).toFixed(2)}`],
+    ["Trạng thái làn", `${lane.state || "UNKNOWN"} (${Math.round((lane.conf || 0) * 100)}%)`],
+    ["Observed / Mất", `${lane.observed ? "Có" : "MẤT"} (miss=${lane.missing_frames ?? 0})`],
+    ["Lệch tâm / Góc", `${lane.e_px ?? 0}px / ${lane.heading_deg ?? 0}°`],
+    ["Góc cua", `${corner.state || "NONE"} (${corner.dir || "-"} | ${corner.zone || "-"})`],
+    ["Ngã rẽ / Ý định", `${junc.type || "NONE"} / ${corner.intent || "-"}`],
+    ["PP / Stanley", `${ctrl.pp_deg ?? "-"}° / ${ctrl.stanley_deg ?? "-"}°`],
+    ["Ánh sáng / Trễ", `${lane.lighting || "-"} / ${row.lane_age_ms ?? 0}ms`],
+    ["Biển báo", signsTxt],
+    ["Hành động", row.sign_action || (row.events && row.events.join(", ")) || "-"],
+  ];
+
+  el.bbTelemetryGrid.innerHTML = pairs.map(([k, v]) =>
+    `<div class="bb-kv"><span>${escHtml(k)}</span><strong>${escHtml(v)}</strong></div>`
+  ).join("");
+
+  drawBbChart();
+}
+
+function drawBbChart() {
+  const canvas = el.bbChart;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.fillStyle = "#101215";
+  ctx.fillRect(0, 0, w, h);
+
+  const tel = bbState.telemetry;
+  if (tel.length < 2) return;
+
+  const padL = 8, padR = 8, padT = 16, padB = 18;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+  const midY = padT + plotH * 0.5;
+
+  // Duong giua (err = 0)
+  ctx.strokeStyle = "#262b33";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padL, midY);
+  ctx.lineTo(w - padR, midY);
+  ctx.stroke();
+
+  const n = tel.length;
+  const xAt = (i) => padL + (i / (n - 1)) * plotW;
+
+  // Dai mau trang thai lan duong o day
+  const barY = h - 12;
+  const stepW = Math.max(1, plotW / n + 0.5);
+  for (let i = 0; i < n; i++) {
+    const lane = tel[i].lane || {};
+    let col = "#ef4444";
+    if (lane.observed && lane.state === "TWO_EDGES") col = "#22c55e";
+    else if (lane.observed) col = "#f59e0b";
+    ctx.fillStyle = col;
+    ctx.fillRect(xAt(i), barY, stepW, 7);
+  }
+
+  // Duong Toc do (%) mau xanh ngoc
+  ctx.strokeStyle = "#34d399";
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const spd = Math.max(-100, Math.min(100, Number(tel[i].speed || 0)));
+    const y = padT + plotH - ((spd + 100) / 200) * plotH;
+    if (i === 0) ctx.moveTo(xAt(i), y);
+    else ctx.lineTo(xAt(i), y);
+  }
+  ctx.stroke();
+
+  // Duong Goc lai (err -1..+1) mau xanh duong
+  ctx.strokeStyle = "#60a5fa";
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const err = Math.max(-1, Math.min(1, Number(tel[i].err || 0)));
+    const y = midY - err * (plotH * 0.45);
+    if (i === 0) ctx.moveTo(xAt(i), y);
+    else ctx.lineTo(xAt(i), y);
+  }
+  ctx.stroke();
+
+  // Danh dau su kien bat thuong
+  for (let i = 0; i < n; i++) {
+    const evs = tel[i].events;
+    if (evs && evs.length) {
+      const hasBad = evs.some((e) => e === "LANE_LOST" || e === "WATCHDOG_STOP" || e === "RECOVERY");
+      ctx.fillStyle = hasBad ? "#ef4444" : "#f59e0b";
+      ctx.beginPath();
+      ctx.arc(xAt(i), 8, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Con tro vi tri hien tai
+  const cx = xAt(bbState.index);
+  ctx.strokeStyle = "#f8fafc";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(cx, 2);
+  ctx.lineTo(cx, h - 2);
+  ctx.stroke();
+}
+
+function scrubChart(clientX) {
+  const tel = bbState.telemetry;
+  if (!tel.length) return;
+  const rect = el.bbChart.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+  const idx = Math.round(ratio * (tel.length - 1));
+  stopBbPlay();
+  renderBbAtIndex(idx);
+}
+
+let _chartDragging = false;
+el.bbChart.addEventListener("pointerdown", (e) => {
+  _chartDragging = true;
+  el.bbChart.setPointerCapture(e.pointerId);
+  scrubChart(e.clientX);
+});
+el.bbChart.addEventListener("pointermove", (e) => {
+  if (_chartDragging) scrubChart(e.clientX);
+});
+el.bbChart.addEventListener("pointerup", () => { _chartDragging = false; });
+el.bbChart.addEventListener("pointercancel", () => { _chartDragging = false; });
+
+function stepBbIndex(delta) {
+  stopBbPlay();
+  renderBbAtIndex(bbState.index + delta);
+}
+
+function stopBbPlay() {
+  bbState.playing = false;
+  if (bbState.playTimer) {
+    clearTimeout(bbState.playTimer);
+    bbState.playTimer = null;
+  }
+  el.btnBbPlay.textContent = "Phát";
+}
+
+function scheduleNextBbTick() {
+  if (!bbState.playing) return;
+  const tel = bbState.telemetry;
+  if (bbState.index >= tel.length - 1) {
+    stopBbPlay();
+    return;
+  }
+  const curT = Number(tel[bbState.index].t || 0);
+  const nxtT = Number(tel[bbState.index + 1].t || curT + 0.05);
+  const dtMs = Math.max(15, Math.min(400, ((nxtT - curT) * 1000) / bbState.speed));
+  bbState.playTimer = setTimeout(() => {
+    renderBbAtIndex(bbState.index + 1);
+    scheduleNextBbTick();
+  }, dtMs);
+}
+
+function toggleBbPlay() {
+  if (!bbState.telemetry.length) return;
+  if (bbState.playing) {
+    stopBbPlay();
+  } else {
+    if (bbState.index >= bbState.telemetry.length - 1) {
+      renderBbAtIndex(0);
+    }
+    bbState.playing = true;
+    el.btnBbPlay.textContent = "Tạm dừng";
+    scheduleNextBbTick();
+  }
+}
+
+el.btnBbFirst.addEventListener("click", () => { stopBbPlay(); renderBbAtIndex(0); });
+el.btnBbLast.addEventListener("click", () => { stopBbPlay(); renderBbAtIndex(bbState.telemetry.length - 1); });
+el.btnBbPrev.addEventListener("click", () => stepBbIndex(-1));
+el.btnBbNext.addEventListener("click", () => stepBbIndex(1));
+el.btnBbPlay.addEventListener("click", toggleBbPlay);
+el.bbSpeedSelect.addEventListener("change", (e) => {
+  bbState.speed = Number(e.target.value) || 1;
+});
+
+el.btnBbToggleRaw.addEventListener("click", () => {
+  bbState.showRawCam1 = !bbState.showRawCam1;
+  el.btnBbToggleRaw.textContent = bbState.showRawCam1 ? "Xem ảnh vẽ làn" : "Xem ảnh gốc";
+  renderBbAtIndex(bbState.index);
+});
+
+el.btnBbNextAnomaly.addEventListener("click", () => {
+  const tel = bbState.telemetry;
+  if (!tel.length) return;
+  const curSeq = Number(tel[bbState.index].seq || 0);
+  const nxt = bbState.anomalies.find((a) => Number(a.seq) > curSeq) || bbState.anomalies[0];
+  if (!nxt) return;
+  const idx = tel.findIndex((r) => Number(r.seq) >= Number(nxt.seq));
+  if (idx >= 0) {
+    stopBbPlay();
+    renderBbAtIndex(idx);
+  }
+});
+
+el.btnBbSaveNote.addEventListener("click", async () => {
+  if (!bbState.currentId) return;
+  try {
+    const res = await fetch(`/api/blackbox/session/${encodeURIComponent(bbState.currentId)}/note`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notes: el.bbNotesInput.value }),
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    el.bbNoteSavedMsg.textContent = "Đã lưu ghi chú";
+    loadBlackBoxSessions();
+  } catch {
+    el.bbNoteSavedMsg.textContent = "Lỗi khi lưu ghi chú";
+  }
+});
+
+el.btnBbExport.addEventListener("click", () => {
+  if (!bbState.currentId) return;
+  window.location.href = `/api/blackbox/session/${encodeURIComponent(bbState.currentId)}/export`;
+});
+
+el.btnBbDelete.addEventListener("click", async () => {
+  const sid = bbState.currentId;
+  if (!sid) return;
+  try {
+    const res = await fetch(`/api/blackbox/session/${encodeURIComponent(sid)}/delete`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+      el.bbStatusMsg.textContent = data.error || "Không xóa được phiên đang ghi";
+      return;
+    }
+    bbState.currentId = null;
+    el.bbDetailWrap.classList.add("hidden");
+    el.bbEmptyDetail.classList.remove("hidden");
+    loadBlackBoxSessions();
+  } catch {
+    el.bbStatusMsg.textContent = "Lỗi khi xóa phiên";
+  }
+});

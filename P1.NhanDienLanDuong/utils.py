@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 ROI_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "roi_config.json")
-DEFAULT_ROI_CFG = {"w_top": 80, "h_top": 28, "w_bot": 22, "h_bot": 224}
+DEFAULT_ROI_CFG = {"w_top": 123, "h_top": 105, "w_bot": 5, "h_bot": 222}
 
 
 def clamp_roi_cfg(cfg, wT=480, hT=240):
@@ -882,7 +882,7 @@ def valTrackbars(wT=480, hT=240, preset="robot"):
             raise cv2.error
     except cv2.error:
         if preset == "robot":
-            widthTop, heightTop, widthBottom, heightBottom = 105, 105, 20, 230
+            widthTop, heightTop, widthBottom, heightBottom = 123, 105, 5, 222
         else:
             widthTop, heightTop, widthBottom, heightBottom = 140, 145, 25, 230
     return np.float32([

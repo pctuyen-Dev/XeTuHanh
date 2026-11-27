@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#111214" />
-  <title>XeTuHanh — Điều khiển</title>
-  <link rel="stylesheet" href="css/style.css?v=12" />
+  <title>XeTuHanh — Điều khiển &amp; Hộp đen</title>
+  <link rel="stylesheet" href="css/style.css?v=13" />
 </head>
 <body>
   <header class="topbar">
@@ -18,127 +18,284 @@
       </span>
       <span class="sep">|</span>
       <span class="muted" id="statusText">Đã dừng</span>
+      <span class="bb-pill hidden" id="bbTopPill" title="Trạng thái ghi hộp đen">
+        <span class="bb-dot"></span>
+        <span id="bbTopText">REC 0s</span>
+      </span>
     </div>
 
     <div class="topbar-right">
+      <div class="seg" role="group" aria-label="Màn hình">
+        <button class="seg-btn active" data-tab="live">Điều khiển</button>
+        <button class="seg-btn" data-tab="blackbox" id="btnTabBlackbox">Hộp đen</button>
+      </div>
       <div class="seg" role="group" aria-label="Chế độ lái">
         <button class="seg-btn active" data-drive="AUTO">Tự hành</button>
         <button class="seg-btn" data-drive="MANUAL">Thủ công</button>
       </div>
+      <button class="btn-bb-rec" id="btnBbRec" title="Bật/tắt ghi hộp đen thủ công">Ghi Hộp đen</button>
       <button class="btn-run" id="btnPowerToggle" title="Bắt đầu / Kết thúc chạy xe (Space để Kết thúc)">Bắt đầu</button>
     </div>
   </header>
 
   <main class="container">
-    <!-- CAMERA -->
-    <section class="cam-row">
-      <div class="panel cam-panel" id="panelCam1">
-        <div class="panel-head">
-          <span>Cam 1 — Làn đường (<span id="cam1Src">CSI</span>)</span>
-          <div class="head-actions">
-            <button class="btn-xs mobile-only" id="btnMobileCamToggle">Xem Cam 2</button>
-            <button class="btn-xs pc-only" id="btnSwitchCam1">Đổi nguồn</button>
+    <!-- TAB 1: DIEU KHIEN TRUC TIEP -->
+    <div id="liveView" class="live-view">
+      <!-- CAMERA -->
+      <section class="cam-row">
+        <div class="panel cam-panel" id="panelCam1">
+          <div class="panel-head">
+            <span>Cam 1 — Làn đường (<span id="cam1Src">CSI</span>)</span>
+            <div class="head-actions">
+              <button class="btn-xs mobile-only" id="btnMobileCamToggle">Xem Cam 2</button>
+              <button class="btn-xs pc-only" id="btnSwitchCam1">Đổi nguồn</button>
+            </div>
+          </div>
+          <div class="video-wrap">
+            <img id="imgCam1" class="cam-stream hidden" alt="Cam 1" />
+            <canvas id="canvasCam1" width="480" height="240"></canvas>
           </div>
         </div>
-        <div class="video-wrap">
-          <img id="imgCam1" class="cam-stream hidden" alt="Cam 1" />
-          <canvas id="canvasCam1" width="480" height="240"></canvas>
+
+        <div class="panel cam-panel" id="panelCam2">
+          <div class="panel-head">
+            <span>Cam 2 — Biển báo (<span id="cam2Src">USB-0</span>)</span>
+            <div class="head-actions">
+              <button class="btn-xs pc-only" id="btnSwitchCam2">Đổi nguồn</button>
+              <button class="btn-xs pc-only" id="btnSwapCam">Hoán đổi</button>
+            </div>
+          </div>
+          <div class="video-wrap">
+            <img id="imgCam2" class="cam-stream hidden" alt="Cam 2" />
+            <canvas id="canvasCam2" width="480" height="270"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- ĐIỀU KHIỂN ĐUA XE & THÔNG SỐ -->
+      <section class="bottom-row">
+        <div class="panel ctrl-panel">
+          <div class="panel-head">
+            <span>Điều khiển</span>
+            <span class="muted pc-only">A/D: Rẽ · W/S: Tăng/Giảm tốc · Space: STOP</span>
+          </div>
+
+          <div class="ctrl-grid">
+            <div class="dpad" role="group" aria-label="Điều khiển hướng">
+              <button class="pad-btn pad-up" data-key="w" aria-label="Tăng tốc / Tiến">
+                <span class="pad-arrow">▲</span>
+                <span class="pad-key">W</span>
+              </button>
+              <button class="pad-btn pad-left" data-key="a" aria-label="Rẽ trái">
+                <span class="pad-arrow">◀</span>
+                <span class="pad-key">A</span>
+              </button>
+              <button class="pad-btn pad-stop" id="btnDpadStop" aria-label="Dừng">
+                <span class="pad-arrow">■</span>
+                <span class="pad-key">STOP</span>
+              </button>
+              <button class="pad-btn pad-right" data-key="d" aria-label="Rẽ phải">
+                <span class="pad-arrow">▶</span>
+                <span class="pad-key">D</span>
+              </button>
+              <button class="pad-btn pad-down" data-key="s" aria-label="Giảm tốc / Lùi">
+                <span class="pad-arrow">▼</span>
+                <span class="pad-key">S</span>
+              </button>
+            </div>
+
+            <div class="sliders">
+              <label class="field">
+                <span>Giới hạn tốc độ: <strong id="maxSpeedLabel">85%</strong></span>
+                <input type="range" id="sliderMaxSpeed" min="20" max="100" value="85" />
+              </label>
+              <label class="field">
+                <span>FOV Camera: <strong id="fovVal">100%</strong></span>
+                <input type="range" id="sliderFov" min="40" max="100" step="10" value="100" />
+              </label>
+              <label class="field">
+                <span>ROI Trên Rộng: <strong id="roiWTopVal">123</strong></span>
+                <input type="range" id="sliderRoiWTop" min="0" max="200" step="1" value="123" />
+              </label>
+              <label class="field">
+                <span>ROI Trên Cao: <strong id="roiHTopVal">105</strong></span>
+                <input type="range" id="sliderRoiHTop" min="0" max="180" step="1" value="105" />
+              </label>
+              <label class="field">
+                <span>ROI Dưới Rộng: <strong id="roiWBotVal">5</strong></span>
+                <input type="range" id="sliderRoiWBot" min="0" max="200" step="1" value="5" />
+              </label>
+              <label class="field">
+                <span>ROI Dưới Cao: <strong id="roiHBotVal">222</strong></span>
+                <input type="range" id="sliderRoiHBot" min="60" max="239" step="1" value="222" />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel info-panel">
+          <div class="panel-head">
+            <span>Thông số xe</span>
+            <code class="uart-code" id="uartPacket">&lt;75,+0.00,NORM&gt;</code>
+          </div>
+
+          <table class="info-table">
+            <tbody>
+              <tr><td>Tốc độ</td><td id="telSpeed">0%</td></tr>
+              <tr><td>Góc lái / Servo</td><td id="telSteer">+0.00 (90°)</td></tr>
+              <tr><td>Biển báo</td><td><div class="sign-list" id="kvSign"></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- TAB 2: HOP DEN (BLACK BOX REPLAY & DIAGNOSTICS) -->
+    <div id="blackboxView" class="bb-view hidden">
+      <div class="panel bb-toolbar">
+        <div class="bb-toolbar-left">
+          <strong>Hộp đen — Quan sát &amp; Phân tích các lần đi</strong>
+          <label class="bb-check">
+            <input type="checkbox" id="chkBbAuto" checked />
+            <span>Tự động ghi khi xe chạy</span>
+          </label>
+        </div>
+        <div class="bb-toolbar-right">
+          <span class="muted" id="bbStatusMsg"></span>
+          <button class="btn-xs" id="btnBbRefresh">Làm mới</button>
         </div>
       </div>
 
-      <div class="panel cam-panel" id="panelCam2">
-        <div class="panel-head">
-          <span>Cam 2 — Biển báo (<span id="cam2Src">USB-0</span>)</span>
-          <div class="head-actions">
-            <button class="btn-xs pc-only" id="btnSwitchCam2">Đổi nguồn</button>
-            <button class="btn-xs pc-only" id="btnSwapCam">Hoán đổi</button>
+      <div class="bb-layout">
+        <!-- Danh sach cac lan di -->
+        <aside class="panel bb-sidebar">
+          <div class="panel-head">
+            <span>Các lần đi (<span id="bbSessionCount">0</span>)</span>
           </div>
-        </div>
-        <div class="video-wrap">
-          <img id="imgCam2" class="cam-stream hidden" alt="Cam 2" />
-          <canvas id="canvasCam2" width="480" height="270"></canvas>
-        </div>
-      </div>
-    </section>
+          <div class="bb-session-list" id="bbSessionList">
+            <div class="bb-empty">Chưa có dữ liệu hộp đen.</div>
+          </div>
+        </aside>
 
-    <!-- ĐIỀU KHIỂN ĐUA XE & THÔNG SỐ -->
-    <section class="bottom-row">
-      <div class="panel ctrl-panel">
-        <div class="panel-head">
-          <span>Điều khiển</span>
-          <span class="muted pc-only">A/D: Rẽ · W/S: Tăng/Giảm tốc · Space: STOP</span>
-        </div>
-
-        <div class="ctrl-grid">
-          <div class="dpad" role="group" aria-label="Điều khiển hướng">
-            <button class="pad-btn pad-up" data-key="w" aria-label="Tăng tốc / Tiến">
-              <span class="pad-arrow">▲</span>
-              <span class="pad-key">W</span>
-            </button>
-            <button class="pad-btn pad-left" data-key="a" aria-label="Rẽ trái">
-              <span class="pad-arrow">◀</span>
-              <span class="pad-key">A</span>
-            </button>
-            <button class="pad-btn pad-stop" id="btnDpadStop" aria-label="Dừng">
-              <span class="pad-arrow">■</span>
-              <span class="pad-key">STOP</span>
-            </button>
-            <button class="pad-btn pad-right" data-key="d" aria-label="Rẽ phải">
-              <span class="pad-arrow">▶</span>
-              <span class="pad-key">D</span>
-            </button>
-            <button class="pad-btn pad-down" data-key="s" aria-label="Giảm tốc / Lùi">
-              <span class="pad-arrow">▼</span>
-              <span class="pad-key">S</span>
-            </button>
+        <!-- Khu vuc xem lai & chuan doan -->
+        <section class="bb-main">
+          <div class="panel" id="bbEmptyDetail">
+            <div class="bb-empty-main">
+              Chọn một lần đi bên trái để xem lại hình ảnh, biểu đồ góc lái, sự cố mất làn và ghi chú sửa lỗi.
+            </div>
           </div>
 
-          <div class="sliders">
-            <label class="field">
-              <span>Giới hạn tốc độ: <strong id="maxSpeedLabel">85%</strong></span>
-              <input type="range" id="sliderMaxSpeed" min="20" max="100" value="85" />
-            </label>
-            <label class="field">
-              <span>FOV Camera: <strong id="fovVal">100%</strong></span>
-              <input type="range" id="sliderFov" min="40" max="100" step="10" value="100" />
-            </label>
-            <label class="field">
-              <span>ROI Trên Rộng: <strong id="roiWTopVal">80</strong></span>
-              <input type="range" id="sliderRoiWTop" min="0" max="200" step="2" value="80" />
-            </label>
-            <label class="field">
-              <span>ROI Trên Cao: <strong id="roiHTopVal">28</strong></span>
-              <input type="range" id="sliderRoiHTop" min="0" max="180" step="2" value="28" />
-            </label>
-            <label class="field">
-              <span>ROI Dưới Rộng: <strong id="roiWBotVal">22</strong></span>
-              <input type="range" id="sliderRoiWBot" min="0" max="200" step="2" value="22" />
-            </label>
-            <label class="field">
-              <span>ROI Dưới Cao: <strong id="roiHBotVal">224</strong></span>
-              <input type="range" id="sliderRoiHBot" min="60" max="239" step="2" value="224" />
-            </label>
+          <div id="bbDetailWrap" class="bb-detail hidden">
+            <div class="panel">
+              <div class="panel-head">
+                <div>
+                  <strong id="bbDetailTitle">run_...</strong>
+                  <span class="muted" id="bbDetailMeta"></span>
+                </div>
+                <div class="head-actions">
+                  <button class="btn-xs" id="btnBbExport">Tải ZIP</button>
+                  <button class="btn-xs btn-danger-xs" id="btnBbDelete">Xóa</button>
+                </div>
+              </div>
+
+              <!-- 3 khung hinh dong bo -->
+              <div class="bb-frames-grid">
+                <div class="bb-frame-box">
+                  <div class="bb-frame-head">
+                    <span>Cam 1 — Làn đường</span>
+                    <button class="btn-xs" id="btnBbToggleRaw">Xem ảnh gốc</button>
+                  </div>
+                  <div class="bb-img-wrap">
+                    <img id="bbImgCam1" alt="Cam 1" />
+                    <span class="bb-no-img hidden" id="bbNoCam1">Không có ảnh</span>
+                  </div>
+                </div>
+                <div class="bb-frame-box">
+                  <div class="bb-frame-head">
+                    <span>Pipeline (Threshold | BEV)</span>
+                  </div>
+                  <div class="bb-img-wrap">
+                    <img id="bbImgWarp" alt="Pipeline" />
+                    <span class="bb-no-img hidden" id="bbNoWarp">Không có ảnh</span>
+                  </div>
+                </div>
+                <div class="bb-frame-box">
+                  <div class="bb-frame-head">
+                    <span>Cam 2 — Biển báo</span>
+                  </div>
+                  <div class="bb-img-wrap">
+                    <img id="bbImgCam2" alt="Cam 2" />
+                    <span class="bb-no-img hidden" id="bbNoCam2">Không có ảnh</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Bieu do Timeline -->
+              <div class="bb-chart-wrap">
+                <div class="bb-chart-legend">
+                  <span><i class="lg-line lg-err"></i> Lái (Err)</span>
+                  <span><i class="lg-line lg-spd"></i> Tốc độ (%)</span>
+                  <span><i class="lg-dot lg-ok"></i> 2 vạch</span>
+                  <span><i class="lg-dot lg-warn"></i> 1 vạch</span>
+                  <span><i class="lg-dot lg-bad"></i> Mất làn</span>
+                  <span class="muted">Click / kéo trên biểu đồ để tua</span>
+                </div>
+                <canvas id="bbChart" width="900" height="160"></canvas>
+              </div>
+
+              <!-- Thanh dieu khien phat lai -->
+              <div class="bb-controls">
+                <div class="bb-ctrl-btns">
+                  <button class="btn-xs" id="btnBbFirst" title="Đầu phiên">|&lt;</button>
+                  <button class="btn-xs" id="btnBbPrev" title="Khung trước (Mũi tên trái)">&lt;</button>
+                  <button class="btn-xs btn-primary-xs" id="btnBbPlay">Phát</button>
+                  <button class="btn-xs" id="btnBbNext" title="Khung tiếp (Mũi tên phải)">&gt;</button>
+                  <button class="btn-xs" id="btnBbLast" title="Cuối phiên">&gt;|</button>
+                  <select id="bbSpeedSelect" class="bb-select" title="Tốc độ phát">
+                    <option value="0.25">0.25x</option>
+                    <option value="0.5">0.5x</option>
+                    <option value="1" selected>1x</option>
+                    <option value="2">2x</option>
+                  </select>
+                  <button class="btn-xs btn-warn-xs" id="btnBbNextAnomaly">Sự cố tiếp</button>
+                </div>
+                <div class="bb-time-info">
+                  <span id="bbTimeLabel">0.00s / 0.00s</span>
+                  <span class="muted" id="bbTickLabel">Tick 0 / 0</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Thong so chi tiet & Su co / Ghi chu -->
+            <div class="bb-bottom-grid">
+              <div class="panel">
+                <div class="panel-head">
+                  <span>Thông số tại thời điểm đang xem</span>
+                  <code class="uart-code" id="bbCurPacket">&lt;0,+0.00,STOP&gt;</code>
+                </div>
+                <div class="bb-tel-grid" id="bbTelemetryGrid"></div>
+              </div>
+
+              <div class="panel">
+                <div class="panel-head">
+                  <span>Sự cố phát hiện (<span id="bbAnomalyCount">0</span>) &amp; Ghi chú Fix</span>
+                </div>
+                <div class="bb-anomaly-list" id="bbAnomalyList"></div>
+                <div class="bb-note-box">
+                  <textarea id="bbNotesInput" rows="3" placeholder="Ghi chú lỗi quan sát được để fix (vd: giây 8.4 bị lóa nắng mất vạch trái, cần giảm H_TOP hoặc chỉnh HSV)..."></textarea>
+                  <div class="bb-note-actions">
+                    <span class="muted" id="bbNoteSavedMsg"></span>
+                    <button class="btn-xs btn-primary-xs" id="btnBbSaveNote">Lưu ghi chú</button>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
+        </section>
       </div>
-
-      <div class="panel info-panel">
-        <div class="panel-head">
-          <span>Thông số xe</span>
-          <code class="uart-code" id="uartPacket">&lt;75,+0.00,NORM&gt;</code>
-        </div>
-
-        <table class="info-table">
-          <tbody>
-            <tr><td>Tốc độ</td><td id="telSpeed">0%</td></tr>
-            <tr><td>Góc lái / Servo</td><td id="telSteer">+0.00 (90°)</td></tr>
-            <tr><td>Biển báo</td><td><div class="sign-list" id="kvSign"></div></td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    </div>
   </main>
 
-  <script src="js/app.js?v=12"></script>
+  <script src="js/app.js?v=13"></script>
 </body>
 </html>

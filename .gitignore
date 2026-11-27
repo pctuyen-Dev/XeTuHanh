@@ -22,4 +22,5 @@ P2.NhanDienBienBao/data/traffic-sign-detection-vietnam/
 P2.NhanDienBienBao/yolo11_10signs_dataset/
 P2.NhanDienBienBao/yolo11_10signs_dataset.zip
 P2.NhanDienBienBao/runs_signs/
+blackbox_logs/
 
