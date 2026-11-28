@@ -248,8 +248,6 @@ def thread_2_lane_perception(state: RobotSharedState, lane_size=(480, 240)):
     last_processed_id = -1
     fps_cnt = 0
     t0 = time.time()
-    latched_intent = "AUTO"
-    latched_intent_time = 0.0
 
     while state.running:
         with state.cam_lock:
@@ -269,41 +267,16 @@ def thread_2_lane_perception(state: RobotSharedState, lane_size=(480, 240)):
             sign_fresh = (state.sign_time > 0.0) and ((now_j - state.sign_time) <= 0.50)
             active_signs = list(state.detected_signs) if sign_fresh else []
 
-        if active_signs:
-            directives = resolve_sign_directives(active_signs, SIGN_INFO)
-            junction_intent = directives["junction_intent"]
-            if junction_intent in ("STRAIGHT", "RIGHT", "LEFT") or directives["forbid_straight"]:
-                latched_intent = junction_intent
-                latched_intent_time = now_j
-            else:
-                latched_intent = "AUTO"
-                latched_intent_time = 0.0
-        else:
-            junction_intent = "AUTO"
-            if latched_intent_time > 0.0 and (now_j - latched_intent_time) <= 2.60:
-                last_det = detector.last_detection or {}
-                j_cur = last_det.get("junction") or {}
-                c_cur = last_det.get("corner") or {}
-                exited_to_straight = (
-                    (now_j - latched_intent_time) >= 1.20
-                    and (not j_cur.get("detected", False))
-                    and (not c_cur.get("confirmed", False))
-                    and last_det.get("lane_state") == "TWO_EDGES"
-                    and abs(float(last_det.get("center_offset_norm", 0.0))) < 0.25
-                )
-                if exited_to_straight:
-                    latched_intent = "AUTO"
-                    latched_intent_time = 0.0
-                else:
-                    junction_intent = latched_intent
-            else:
-                latched_intent = "AUTO"
-                latched_intent_time = 0.0
+        sign_directives = resolve_sign_directives(active_signs, SIGN_INFO)
+        junction_intent = sign_directives.get("junction_intent", "STRAIGHT")
+        forbid_right_sign = bool(sign_directives.get("forbid_right", False))
+        forbid_left_sign = bool(sign_directives.get("forbid_left", False))
 
         try:
             curve_val, _, img_thres, img_warp_vis, img_hist_combined, img_result = detector.process_frame(
                 frame, points, hsv_range=hsv_range, use_dual_edge=True, profile="robot",
-                fresh_observation=True, restrict_roi=True, junction_intent=junction_intent
+                fresh_observation=True, restrict_roi=False, junction_intent=junction_intent,
+                forbid_right=forbid_right_sign, forbid_left=forbid_left_sign
             )
             det_info = dict(detector.last_detection)
             now = time.time()

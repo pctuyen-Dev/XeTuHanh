@@ -121,6 +121,7 @@ class LaneDetector:
         self._active_turn_dir = "UNKNOWN"
         self._active_turn_hold = 0
         self._active_turn_hold_s = 0.0
+        self._turn_committed_dir = "UNKNOWN"
         self._intent_turn_dir = "UNKNOWN"
         self._intent_turn_ttl = 0
         self._intent_turn_ttl_s = 0.0
@@ -151,6 +152,7 @@ class LaneDetector:
         self._smooth_right_segs = []
         self._smooth_turn_prog = None
         self._smooth_steer_norm = None
+        self._straight_e_int = 0.0
         self._smooth_elbow_y = None
         self._smooth_ground_turn_deg = None
         self.center_pts = np.empty((0, 2), dtype=np.float32)
@@ -2985,16 +2987,19 @@ class LaneDetector:
 
         # Thanh vach ngang xuyen khung hinh o giua goc cua (khong co than doc): xac dinh theo huong cua dang nho
         min_y_all = float(pts[:, 1].min())
+        turn_ctx = "UNKNOWN"
+        j_int_now = getattr(self, "_last_junction_intent", None)
+        if j_int_now in ("LEFT", "RIGHT"):
+            turn_ctx = j_int_now
+        elif self.corner_memory.get("active") and self.corner_memory.get("ttl", 0) > 0:
+            turn_ctx = self.corner_memory.get("direction", "UNKNOWN")
+        elif self._active_turn_dir in ("LEFT", "RIGHT"):
+            turn_ctx = self._active_turn_dir
+        elif self._intent_turn_dir in ("LEFT", "RIGHT"):
+            turn_ctx = self._intent_turn_dir
         if (span_x >= wT * 0.35 and span_y < 48.0 and bot_y < hT * 0.80) or (
             span_x >= wT * 0.22 and span_y < 48.0 and min_y_all >= hT * 0.35 and bot_y < hT * 0.82
         ):
-            turn_ctx = "UNKNOWN"
-            if self.corner_memory.get("active") and self.corner_memory.get("ttl", 0) > 0:
-                turn_ctx = self.corner_memory.get("direction", "UNKNOWN")
-            elif self._active_turn_dir in ("LEFT", "RIGHT"):
-                turn_ctx = self._active_turn_dir
-            elif self._intent_turn_dir in ("LEFT", "RIGHT"):
-                turn_ctx = self._intent_turn_dir
             if turn_ctx == "RIGHT":
                 return "LEFT"
             if turn_ctx == "LEFT":
@@ -3050,15 +3055,20 @@ class LaneDetector:
 
         # 3. Bo nho lo trinh goc cua: khi vao cua PHAI, vach bung phai thuong khuat truoc, con lai vach lung TRAI
         active_mem_dir = (
-            self.corner_memory.get("direction", "UNKNOWN")
-            if (self.corner_memory.get("active") and self.corner_memory.get("ttl", 0) > 0)
-            else (self._active_turn_dir if self._active_turn_dir in ("LEFT", "RIGHT") else "UNKNOWN")
+            turn_ctx
+            if turn_ctx in ("LEFT", "RIGHT")
+            else "UNKNOWN"
         )
         if active_mem_dir in ("LEFT", "RIGHT"):
             dx_total = float(segs[-1]["p2"][0] - segs[0]["p1"][0])
             span_x_m = float(pts[:, 0].max() - pts[:, 0].min())
             span_y_m = float(pts[:, 1].max() - pts[:, 1].min())
             min_y_m = float(pts[:, 1].min())
+            dy_up_m = float(segs[0]["p1"][1] - segs[-1]["p2"][1])
+            if active_mem_dir == "RIGHT" and dy_up_m >= 20.0 and dx_total >= wT * 0.28:
+                return "LEFT"
+            if active_mem_dir == "LEFT" and dy_up_m >= 20.0 and dx_total <= -wT * 0.28:
+                return "RIGHT"
             if active_mem_dir == "RIGHT" and dx_total > 45.0:
                 score -= 3.0
             elif active_mem_dir == "RIGHT" and dx_total > 20.0 and bot_x <= mid_x + 30.0:
@@ -3452,6 +3462,8 @@ class LaneDetector:
             if self._intent_turn_dir in ("LEFT", "RIGHT") and candidate != self._intent_turn_dir:
                 self._active_turn_hold_s = 0.0
                 self._active_turn_hold = 0
+                if getattr(self, "_turn_committed_dir", "UNKNOWN") != candidate:
+                    self._turn_committed_dir = "UNKNOWN"
             self._intent_turn_dir = candidate
             self._intent_turn_ttl_s = 4.0
             self._intent_turn_ttl = 60
@@ -3463,6 +3475,7 @@ class LaneDetector:
                     self._intent_turn_dir = "UNKNOWN"
                     self._intent_turn_ttl_s = 0.0
                     self._intent_turn_ttl = 0
+                    self._turn_committed_dir = "UNKNOWN"
                     self.corner_memory["active"] = False
                     self.corner_memory["direction"] = "UNKNOWN"
                     self.corner_memory["ttl"] = 0
@@ -3513,24 +3526,65 @@ class LaneDetector:
                 mean_ground_turn_deg = mean_turn_deg
 
             is_single_edge = len(self.observed_boundaries) == 1
-            corner_ready = (mean_turn_deg >= 38.0) and (both_agree or self._corner_hits >= 2 or not fresh_observation)
+            # Khi cua phai chi duoc phep bat cua gat 1 vach khi vach PHAI (mep trong) da bien mat (L>0, R==0);
+            # khong kich hoat neu chi bi rot vach TRAI (mep ngoai) tam thoi 1 frame.
+            inner_lost_ok = (
+                (candidate == "RIGHT" and len(self.left_segments) > 0 and len(self.right_segments) == 0)
+                or (candidate == "LEFT" and len(self.right_segments) > 0 and len(self.left_segments) == 0)
+            )
+            # Khi TWO_EDGES nhung mep NGOAI van con than thang dai len phia tren (vach ngang truoc mat con xa),
+            # khong de khuyu cua cua mep trong (elbow gan day) kich hoat TURN_NOW som.
+            outer_far_ahead = False
+            if len(self.observed_boundaries) == 2 and candidate in ("LEFT", "RIGHT"):
+                opp_side_chk = "LEFT" if candidate == "RIGHT" else "RIGHT"
+                if (
+                    len(elbows) >= 2
+                    and float(np.min([pt[1] for pt in elbows])) < h * 0.48
+                    and max(stem_spans[candidate]) >= h * 0.45
+                ):
+                    outer_far_ahead = True
+                elif not outer_far_ahead:
+                    for b_opp in self.observed_boundaries:
+                        if b_opp.get("side") == opp_side_chk:
+                            opp_segs = b_opp.get("segments", [])
+                            if opp_segs:
+                                op_bot_y = float(opp_segs[0]["p1"][1])
+                                op_top_y = float(opp_segs[-1]["p2"][1])
+                                if (op_bot_y - op_top_y) >= h * 0.45 and op_top_y < h * 0.35:
+                                    outer_far_ahead = True
+                            break
+
+            corner_ready = (mean_turn_deg >= 30.0) and (both_agree or self._corner_hits >= 2 or not fresh_observation)
+            # Doi xe di thang sat len toi gan vach ngang truoc mat (elbow_y >= 0.58*h hoac stem ngan <= 0.30*h)
+            # hang bat TURN_NOW tren ONE_EDGE, tranh cua gat qua som khi vach truoc mat van con o phia tren (y ~ 0.28*h).
+            committed_here = getattr(self, "_turn_committed_dir", "UNKNOWN") == candidate
             single_edge_sharp_ready = (
                 is_single_edge
-                and elbow_y_ratio >= 0.56
-                and mean_turn_deg >= 58.0
-                and (self._corner_hits >= 2 or not fresh_observation)
+                and inner_lost_ok
+                and (
+                    (
+                        mean_turn_deg >= 55.0
+                        and (
+                            elbow_y_ratio >= 0.58
+                            or (elbow_y_ratio >= 0.52 and stem_span_y <= h * 0.30)
+                        )
+                    )
+                    or (committed_here and elbow_y_ratio >= 0.38 and mean_turn_deg >= 45.0)
+                )
+                and (self._corner_hits >= 2 or self._active_turn_dir == candidate or committed_here or not fresh_observation)
             )
 
-            if (
+            if (not outer_far_ahead) and (
                 (elbow_y_ratio >= 0.65 and corner_ready)
-                or (elbow_y_ratio >= 0.58 and stem_span_y <= h * 0.12 and corner_ready)
-                or (is_single_edge and min_start_y < h * 0.68 and corner_ready)
+                or (elbow_y_ratio >= 0.58 and stem_span_y <= h * 0.14 and corner_ready)
+                or (is_single_edge and inner_lost_ok and min_start_y < h * 0.68 and corner_ready)
                 or single_edge_sharp_ready
             ):
                 distance_zone = "TURN_NOW"
                 turn_now = True
                 confirmed = True
                 self._active_turn_dir = candidate
+                self._turn_committed_dir = candidate
                 self._active_turn_hold_s = 0.53
                 self._active_turn_hold = 8
             elif (
@@ -3835,7 +3889,13 @@ class LaneDetector:
             r_el = self._find_corner_elbow_seg_idx(self.right_segments)
             turn_deg_chk = float(corner_info.get("turn_angle_deg", 0.0)) if corner_info is not None else 0.0
             confirmed_chk = bool(corner_info.get("confirmed", False)) if corner_info is not None else False
-            real_corner_trigger = (
+            l_len_tot = sum(float(s["length"]) for s in self.left_segments)
+            r_len_tot = sum(float(s["length"]) for s in self.right_segments)
+            single_side_branch_only = (
+                (l_el is None and r_el is not None and len(self.left_segments) == 1 and l_len_tot >= 90.0)
+                or (r_el is None and l_el is not None and len(self.right_segments) == 1 and r_len_tot >= 90.0)
+            )
+            real_corner_trigger = (not single_side_branch_only) and (
                 (l_el is not None and r_el is not None)
                 or confirmed_chk
                 or turn_deg_chk >= 26.0
@@ -3882,11 +3942,11 @@ class LaneDetector:
                     "straight_clear_cnt": 0,
                 })
             elif mem.get("active"):
-                # Decay and deactivate stale corner memory once BOTH boundaries are straight again on corner exit
+                # Giai phong nhanh bo nho goc cua khi da thay lai ca 2 vach khong con gap goc (ke ca khi dang hoi cheo)
                 dx_span = abs(float(c_pts[-1, 0] - c_pts[0, 0]))
-                if dx_span < float(wT) * 0.28:
+                if (not real_corner_trigger) or dx_span < float(wT) * 0.35:
                     mem["straight_clear_cnt"] = int(mem.get("straight_clear_cnt", 0)) + 1
-                    mem["ttl_s"] = max(0.0, float(mem.get("ttl_s", 0.0)) - max(0.50, dt_step * 4.0))
+                    mem["ttl_s"] = max(0.0, float(mem.get("ttl_s", 0.0)) - max(0.60, dt_step * 5.0))
                     mem["ttl"] = max(0, int(round(mem["ttl_s"] * 15.0)))
                     if mem["straight_clear_cnt"] >= 2 or mem["ttl"] <= 0:
                         mem["active"] = False
@@ -3938,7 +3998,7 @@ class LaneDetector:
 
         return c_pts, p_flags
 
-    def _detect_junction_geometry(self, hT, wT, corner_info=None, dt_step=1.0 / 15.0, fresh_observation=True, junction_intent=None, top_y_hint=105):
+    def _detect_junction_geometry(self, hT, wT, corner_info=None, dt_step=1.0 / 15.0, fresh_observation=True, junction_intent=None):
         """
         Phat hien hinh hoc Nga 3 (3-way Junction) tu 2 bien lan duong:
           - RIGHT_BRANCH (|-): Vach TRAI di thang len dinh + vach PHAI re nhanh sang PHAI (hoac mo khoang trong ben phai).
@@ -3948,8 +4008,6 @@ class LaneDetector:
           - T_HEAD (chu T):    Vach ngang chan phia truoc khong cho di thang, 2 ben Trai/Phai deu mo.
             -> Cac huong hop le: ["LEFT", "RIGHT"]
         """
-        top_reach_lim = min(float(hT) * 0.56, max(float(hT) * 0.34, float(top_y_hint) + 16.0))
-
         def _is_straight_up(segs, side):
             if not segs:
                 return False
@@ -3960,7 +4018,7 @@ class LaneDetector:
             y_top = float(segs[-1]["p2"][1])
             x_bot = float(segs[0]["p1"][0])
             x_top = float(segs[-1]["p2"][0])
-            if y_bot < hT * 0.54 or y_top > top_reach_lim or (y_bot - y_top) < 58.0:
+            if y_bot < hT * 0.54 or y_top > hT * 0.34 or (y_bot - y_top) < 58.0:
                 return False
             if self._find_corner_elbow_seg_idx(segs) is not None:
                 return False
@@ -4002,12 +4060,6 @@ class LaneDetector:
         def _is_t_crossbar(segs):
             if not segs:
                 return False, None
-            # Khong nhan nham vach mep ngoai chu L cua khuc cua 90 do (co chan dung di tu day len khuyu) la thanh ngang chu T
-            el_chk = self._find_corner_elbow_seg_idx(segs)
-            if el_chk is not None and el_chk > 0:
-                stem_dy = float(segs[0]["p1"][1]) - float(segs[el_chk - 1]["p2"][1])
-                if stem_dy >= 24.0 and float(segs[0]["p1"][1]) >= hT * 0.60:
-                    return False, None
             xs = [float(s["p1"][0]) for s in segs] + [float(segs[-1]["p2"][0])]
             ys = [float(s["p1"][1]) for s in segs] + [float(segs[-1]["p2"][1])]
             span_x = max(xs) - min(xs)
@@ -4022,6 +4074,9 @@ class LaneDetector:
         r_straight = _is_straight_up(self.right_segments, "RIGHT")
         r_bend_right, r_eb_y, r_ang = _has_branch_bend(self.right_segments, "RIGHT")
         l_bend_left, l_eb_y, l_ang = _has_branch_bend(self.left_segments, "LEFT")
+        # Neu vach ngoai da be khuc cung chieu cua (vd: vach trai be phai) -> day la goc cua 90 do, KHONG phai nga 3
+        l_bend_right, _, _ = _has_branch_bend(self.left_segments, "RIGHT")
+        r_bend_left, _, _ = _has_branch_bend(self.right_segments, "LEFT")
 
         j_type = "NONE"
         avail = ["STRAIGHT"]
@@ -4032,7 +4087,7 @@ class LaneDetector:
         conf = 0.0
 
         # 1. Nga 3 nhanh phai (|-) khi ca 2 bien deu thay ro
-        if l_straight and r_bend_right:
+        if l_straight and r_bend_right and not l_bend_right:
             j_type = "RIGHT_BRANCH"
             avail = ["STRAIGHT", "RIGHT"]
             branch_side = "RIGHT"
@@ -4041,7 +4096,7 @@ class LaneDetector:
             phase = "AT_JUNCTION" if (r_eb_y is not None and r_eb_y >= 88.0) else "APPROACH"
             conf = float(_clip_scalar(0.55 + (r_ang - 32.0) / 100.0, 0.55, 0.96))
         # 2. Nga 3 nhanh trai (-|) khi ca 2 bien deu thay ro
-        elif r_straight and l_bend_left:
+        elif r_straight and l_bend_left and not r_bend_left:
             j_type = "LEFT_BRANCH"
             avail = ["STRAIGHT", "LEFT"]
             branch_side = "LEFT"
@@ -4077,6 +4132,18 @@ class LaneDetector:
                 conf = 0.80
 
         mem = self._junction_mem
+        # Huy ngay bo nho NGA 3 neu vach doi dien thuc su da be goc cua cung chieu, hoac T_HEAD cu khi da thay vach thang
+        if (
+            (mem["type"] == "RIGHT_BRANCH" and l_bend_right)
+            or (mem["type"] == "LEFT_BRANCH" and r_bend_left)
+            or (mem["type"] == "T_HEAD" and (l_straight or r_straight) and j_type == "NONE")
+        ):
+            mem["type"] = "NONE"
+            mem["branch_side"] = None
+            mem["straight_edge_side"] = None
+            mem["ttl_s"] = 0.0
+            mem["last_elbow_y"] = None
+
         if j_type != "NONE":
             mem["type"] = j_type
             mem["branch_side"] = branch_side
@@ -4145,7 +4212,7 @@ class LaneDetector:
             "confidence": float(conf),
         }
 
-    def detect_dual_lanes(self, mask, hT, wT, top_y_hint=105, img_gray=None, fresh_observation=True, precomputed_cc=None, dt_s=None, junction_intent=None):
+    def detect_dual_lanes(self, mask, hT, wT, top_y_hint=105, img_gray=None, fresh_observation=True, precomputed_cc=None, dt_s=None, junction_intent=None, forbid_right=False, forbid_left=False):
         self._last_corner_info = None
         self._last_junction_info = {
             "detected": False,
@@ -4380,12 +4447,66 @@ class LaneDetector:
                 "width": r_w,
                 "turns": float(max(0, len(self.right_segments) - 1)),
             })
+        self._last_junction_intent = junction_intent if junction_intent in ("LEFT", "RIGHT") else None
+        if fresh_observation:
+            self._forbid_right_ttl_s = max(0.0, float(getattr(self, "_forbid_right_ttl_s", 0.0)) - float(dt_step))
+            self._forbid_left_ttl_s = max(0.0, float(getattr(self, "_forbid_left_ttl_s", 0.0)) - float(dt_step))
+        if junction_intent in ("LEFT", "RIGHT"):
+            self._intent_turn_dir = junction_intent
+            if self._active_turn_dir not in ("UNKNOWN", junction_intent):
+                self._active_turn_dir = "UNKNOWN"
+                self._active_turn_hold_s = 0.0
+                self._active_turn_hold = 0
+            if junction_intent == "RIGHT":
+                self._forbid_right_ttl_s = 0.0
+            else:
+                self._forbid_left_ttl_s = 0.0
+        if forbid_right:
+            self._forbid_right_ttl_s = 1.60
+        if forbid_left:
+            self._forbid_left_ttl_s = 1.60
+        forbid_r_eff = bool(forbid_right or getattr(self, "_forbid_right_ttl_s", 0.0) > 0.0)
+        forbid_l_eff = bool(forbid_left or getattr(self, "_forbid_left_ttl_s", 0.0) > 0.0)
         self._associate_boundaries(cands, hT, wT)
         corner_info = self.inspect_corner(None, fresh_observation=fresh_observation, img_shape=(hT, wT), dt_s=dt_step)
+        if (
+            junction_intent in ("LEFT", "RIGHT")
+            and len(self.observed_boundaries) == 1
+            and corner_info.get("candidate") not in ("UNKNOWN", junction_intent)
+        ):
+            corner_info = dict(corner_info)
+            corner_info["direction"] = "UNKNOWN"
+            corner_info["candidate"] = "UNKNOWN"
+            corner_info["confirmed"] = False
+            corner_info["distance_zone"] = "NONE"
+            corner_info["turn_now"] = False
+            self._active_turn_dir = "UNKNOWN"
+            self._active_turn_hold_s = 0.0
+            self._active_turn_hold = 0
+            self._intent_turn_dir = junction_intent
+            if self.corner_memory.get("active") and self.corner_memory.get("direction") != junction_intent:
+                self.corner_memory["active"] = False
+                self.corner_memory["direction"] = "UNKNOWN"
+        if (forbid_r_eff and corner_info.get("candidate") == "RIGHT") or (forbid_l_eff and corner_info.get("candidate") == "LEFT"):
+            forb_dir = corner_info.get("candidate")
+            corner_info = dict(corner_info)
+            corner_info["direction"] = "UNKNOWN"
+            corner_info["candidate"] = "UNKNOWN"
+            corner_info["confirmed"] = False
+            corner_info["distance_zone"] = "NONE"
+            corner_info["turn_now"] = False
+            if self._active_turn_dir == forb_dir:
+                self._active_turn_dir = "UNKNOWN"
+                self._active_turn_hold_s = 0.0
+                self._active_turn_hold = 0
+            if self._intent_turn_dir == forb_dir:
+                self._intent_turn_dir = "UNKNOWN"
+            if self.corner_memory.get("active") and self.corner_memory.get("direction") == forb_dir:
+                self.corner_memory["active"] = False
+                self.corner_memory["direction"] = "UNKNOWN"
         junction_info = self._detect_junction_geometry(
             hT, wT, corner_info=corner_info, dt_step=dt_step,
             fresh_observation=fresh_observation, junction_intent=junction_intent,
-            top_y_hint=top_y_hint,
         )
         self._last_junction_info = junction_info
 
@@ -4422,14 +4543,6 @@ class LaneDetector:
                 effective_intent = "RIGHT"
             elif jt_auto == "LEFT_BRANCH":
                 effective_intent = "LEFT"
-
-        if effective_intent == "STRAIGHT":
-            # Khi co bien DI THANG / CAM RE: xoa ngay bo nho cua cu tu khuc cua truoc
-            if self.corner_memory.get("active"):
-                self.corner_memory["active"] = False
-                self.corner_memory["direction"] = "UNKNOWN"
-            self._active_turn_hold_s = 0.0
-            self._active_turn_hold = 0
 
         if junction_info.get("detected") and effective_intent == "STRAIGHT":
             j_type = junction_info.get("type")
@@ -4489,37 +4602,53 @@ class LaneDetector:
             j_type = junction_info.get("type")
             eb_y_j = junction_info.get("branch_elbow_y")
             if effective_intent == "RIGHT" and j_type in ("RIGHT_BRANCH", "T_HEAD"):
-                if j_type == "RIGHT_BRANCH" and self.left_segments:
-                    if eb_y_j is not None and float(eb_y_j) < hT * 0.48:
+                has_real_right_branch = (
+                    j_type == "T_HEAD"
+                    or (bool(self.right_segments) and eb_y_j is not None and float(eb_y_j) >= hT * 0.44)
+                )
+                if j_type == "RIGHT_BRANCH" and self.left_segments and self.right_segments:
+                    if eb_y_j is not None and float(eb_y_j) < hT * 0.62:
                         stem_l_keep = _clip_segs_below_y(self.left_segments, float(eb_y_j) + 4.0)
                         if sum(float(s["length"]) for s in stem_l_keep) >= 24.0:
                             self.left_segments = stem_l_keep
-                        elif self.right_segments:
+                        else:
                             self.left_segments = []
                             self.single_edge_side = "RIGHT"
-                    elif self.right_segments:
+                    else:
                         self.left_segments = []
                         self.single_edge_side = "RIGHT"
-                corner_info = dict(corner_info)
-                corner_info["direction"] = "RIGHT"
-                corner_info["candidate"] = "RIGHT"
-                corner_info["intent_direction"] = "RIGHT"
-                corner_info["confirmed"] = True
-                corner_info["distance_zone"] = "TURN_NOW"
-                corner_info["turn_now"] = True
+                if has_real_right_branch:
+                    corner_info = dict(corner_info)
+                    corner_info["direction"] = "RIGHT"
+                    corner_info["candidate"] = "RIGHT"
+                    corner_info["intent_direction"] = "RIGHT"
+                    corner_info["confirmed"] = True
+                    corner_info["distance_zone"] = "TURN_NOW"
+                    corner_info["turn_now"] = True
             elif effective_intent == "LEFT" and j_type in ("LEFT_BRANCH", "T_HEAD"):
-                if j_type == "LEFT_BRANCH" and self.right_segments:
-                    if eb_y_j is not None and float(eb_y_j) < hT * 0.48:
+                has_real_left_branch = (
+                    j_type == "T_HEAD"
+                    or (bool(self.left_segments) and eb_y_j is not None and float(eb_y_j) >= hT * 0.44)
+                )
+                if j_type == "LEFT_BRANCH" and self.right_segments and self.left_segments:
+                    if eb_y_j is not None and float(eb_y_j) < hT * 0.62:
                         stem_r_keep = _clip_segs_below_y(self.right_segments, float(eb_y_j) + 4.0)
                         if sum(float(s["length"]) for s in stem_r_keep) >= 24.0:
                             self.right_segments = stem_r_keep
-                        elif self.left_segments:
+                        else:
                             self.right_segments = []
                             self.single_edge_side = "LEFT"
-                    elif self.left_segments:
+                    else:
                         self.right_segments = []
                         self.single_edge_side = "LEFT"
-                corner_info = dict(corner_info)
+                if has_real_left_branch:
+                    corner_info = dict(corner_info)
+                    corner_info["direction"] = "LEFT"
+                    corner_info["candidate"] = "LEFT"
+                    corner_info["intent_direction"] = "LEFT"
+                    corner_info["confirmed"] = True
+                    corner_info["distance_zone"] = "TURN_NOW"
+                    corner_info["turn_now"] = True
                 corner_info["direction"] = "LEFT"
                 corner_info["candidate"] = "LEFT"
                 corner_info["intent_direction"] = "LEFT"
@@ -4871,7 +5000,8 @@ class LaneDetector:
 
     def process_frame(self, img, points, hsv_range=None, use_dual_edge=True,
                       profile="robot", fresh_observation=True, restrict_roi=False,
-                      draw_aux_views=False, draw_overlay=True, dt_s=None, junction_intent=None):
+                      draw_aux_views=False, draw_overlay=True, dt_s=None, junction_intent=None,
+                      forbid_right=False, forbid_left=False):
         """Xu ly khung hinh va tra ve (norm_curve, img_roi, img_thres, img_warp_vis, img_hist_combined, img_result)."""
         hT, wT = img.shape[:2]
         img_result = img.copy()
@@ -4976,6 +5106,8 @@ class LaneDetector:
                     precomputed_cc=pre_cc,
                     dt_s=dt_step,
                     junction_intent=junction_intent,
+                    forbid_right=forbid_right,
+                    forbid_left=forbid_left,
                 )
                 corner = (
                     self._last_corner_info
@@ -5216,16 +5348,24 @@ class LaneDetector:
                     elif elbow_y_val is not None and c_turn_dir in ("LEFT", "RIGHT"):
                         ang_scale = _smoothstep(24.0, 36.0, turn_ang)
                         ang_blend = _smoothstep(28.0, 58.0, turn_ang)
-                        prog_steep = _smoothstep(0.24, 0.60, float(elbow_y_val) / float(max(1, hT)))
+                        prog_steep = _smoothstep(0.40, 0.64, float(elbow_y_val) / float(max(1, hT)))
                         prog_gentle = _smoothstep(0.46, 0.72, float(elbow_y_val) / float(max(1, hT)))
                         turn_prog = ((1.0 - ang_blend) * prog_gentle + ang_blend * prog_steep) * ang_scale
                         if not (self.left_segments and self.right_segments) and turn_ang >= 24.0:
+                            # Khi than vach doc duoi day van con dai va khuyu cua chua xuong gan mui xe,
+                            # khong ep turn_prog len cao; neu da cam ket cua (committed) thi khong tut lai giua chung.
+                            committed_same = getattr(self, "_turn_committed_dir", "UNKNOWN") == c_turn_dir
+                            single_eb_gate = (
+                                1.0
+                                if (committed_same or cy_low < float(hT) * 0.72)
+                                else _smoothstep(0.42, 0.60, float(elbow_y_val) / float(max(1, hT)))
+                            )
                             if turn_ang >= 36.0:
-                                single_prog = 0.42 + 0.30 * _smoothstep(45.0, 56.0, turn_ang) * arm_blend + 0.18 * wide_blend
+                                single_prog = (0.42 + 0.30 * _smoothstep(45.0, 56.0, turn_ang) * arm_blend + 0.18 * wide_blend) * single_eb_gate
                                 turn_prog = max(turn_prog, single_prog)
                             elif dx_arm_cur >= wT * 0.44:
-                                # Goc cua vat 45 do nhin thay toan bo thanh ngang phia truoc (ONE_EDGE): giu turn_prog cao
-                                turn_prog = max(turn_prog, 0.58 + 0.22 * arm_blend)
+                                # Goc cua vat 45 do nhin thay toan bo thanh ngang phia truoc (ONE_EDGE): giu turn_prog cao khi da xuong gan
+                                turn_prog = max(turn_prog, (0.58 + 0.22 * arm_blend) * single_eb_gate)
                     else:
                         turn_prog = 0.0
 
@@ -5234,19 +5374,37 @@ class LaneDetector:
                         turn_prog = float(alpha_tp * turn_prog + (1.0 - alpha_tp) * self._smooth_turn_prog)
                     self._smooth_turn_prog = float(turn_prog) if fresh_observation else None
 
-                    # Chi giu lookahead tren doan thang truoc khuyu cua khi xe CON o trong hanh lang 2 vach (TWO_EDGES)
-                    # va dinh cua chua xuong sat mui xe (elbow_y < 166px); chuyen tiep muot sang nhanh cua khi tien gan,
-                    # TUYET DOI khong khoa lookahead sau khuyu cua khi chi con 1 vach (ONE_EDGE) giua cua!
+                    # Giu lookahead tren doan than thang truoc khuyu cua khi xe dang tien len gan vach truoc mat
+                    # (ca TWO_EDGES lan ONE_EDGE khi than duoi van con dai cy_low >= 0.76*hT va khuyu chua xuong sat <= 0.56*hT).
                     has_both_edges_now = bool(self.left_segments and self.right_segments)
+                    is_right_approach_inner_only = (
+                        not has_both_edges_now
+                        and c_turn_dir == "RIGHT"
+                        and self.single_edge_side == "RIGHT"
+                        and not turn_now_flag
+                        and corner.get("distance_zone") in ("FAR", "APPROACH")
+                    )
+                    is_single_stem_approach = (
+                        not has_both_edges_now
+                        and c_turn_dir in ("LEFT", "RIGHT")
+                        and getattr(self, "_turn_committed_dir", "UNKNOWN") != c_turn_dir
+                        and not turn_now_flag
+                        and corner.get("distance_zone") in ("FAR", "APPROACH")
+                        and cy_low >= float(hT) * 0.76
+                        and elbow_y_val is not None
+                        and float(elbow_y_val) < float(hT) * 0.56
+                    )
                     approach_clamp_w = 0.0
-                    if (
-                        has_both_edges_now
+                    if is_single_stem_approach:
+                        approach_clamp_w = 1.0 - _smoothstep(float(hT) * 0.44, float(hT) * 0.56, float(elbow_y_val))
+                    elif (
+                        (has_both_edges_now or is_right_approach_inner_only)
                         and not turn_now_flag
                         and corner.get("distance_zone") != "TURN_NOW"
                         and elbow_y_val is not None
-                        and float(elbow_y_val) < 172.0
+                        and float(elbow_y_val) < 192.0
                     ):
-                        approach_clamp_w = 1.0 - _smoothstep(144.0, 172.0, float(elbow_y_val))
+                        approach_clamp_w = 1.0 - _smoothstep(162.0, 192.0, float(elbow_y_val))
 
                     if turn_prog > 0.0 and (elbow_y_val is not None or not has_both_edges_now):
                         if elbow_x_val is not None and elbow_y_val is not None:
@@ -5327,6 +5485,21 @@ class LaneDetector:
 
                     x_near_g, y_near_g = _to_ground_lw(cx_near, cy_near)
                     x_look_g, y_look_g = _to_ground_lw(cx_look, cy_look)
+                    # Khi chuan bi re phai (FAR / APPROACH): dich nhe tam bam ve phia vach TRAI
+                    # de xe mo rong goc vao cua, khong om som nhung cung khong ep sat mep trai qua muoc.
+                    right_outer_bias = 0.0
+                    if (
+                        c_turn_dir == "RIGHT"
+                        and (
+                            has_both_edges_now
+                            or is_right_approach_inner_only
+                            or (is_single_stem_approach and float(elbow_y_val) < float(hT) * 0.50)
+                        )
+                        and not turn_now_flag
+                        and corner.get("distance_zone") in ("FAR", "APPROACH")
+                    ):
+                        right_outer_bias = 0.18 if corner.get("distance_zone") == "FAR" else 0.10
+                        x_look_g -= 0.5 * right_outer_bias
 
                     # Chuan hoa goc huong Stanley: tinh theo tiep tuyen tim duong tai vung day quanh truc truoc (y = 190 - 230 px),
                     # khong dung vector xien noi toi diem ngam nhanh re ngang
@@ -5389,9 +5562,9 @@ class LaneDetector:
                     kappa_pp = (2.0 * x_look_g) / (ld_g * ld_g)
                     pp_rad = float(math.atan(kappa_pp * wheelbase_lw))
 
-                    k_lat_stanley = 1.10 - 0.35 * _clip_scalar(turn_prog, 0.0, 1.0)
-                    # Co khuc cua phia truoc: e_lat nguoc huong cua KHONG duoc trit tieu goc cua cua PP
                     zone_now = corner.get("distance_zone")
+                    k_lat_base = 1.22 if (has_both_edges_now and zone_now == "NONE" and not turn_now_flag) else 0.92
+                    k_lat_stanley = k_lat_base - 0.28 * _clip_scalar(turn_prog, 0.0, 1.0)
                     tp_eff = float(turn_prog)
                     if zone_now in ("APPROACH", "TURN_NOW"):
                         tp_eff = max(tp_eff, TURN_ZONE_PROG_FLOOR)
@@ -5411,7 +5584,7 @@ class LaneDetector:
                     e_norm_pred = float(_clip_scalar(e_norm_out + k_pred * math.sin(heading_rad), -1.0, 1.0))
 
                     # Bu phan lech do HINH HOC cung tron cua e do o hang day (chi ap dung tren cung tron TWO_EDGES thuc su)
-                    e_stan_in = e_norm_pred
+                    e_stan_in = float(_clip_scalar(e_norm_pred - right_outer_bias, -1.0, 1.0))
                     e_curv_comp = 0.0
                     kappa_near_g = 0.0
                     if (
@@ -5450,7 +5623,7 @@ class LaneDetector:
                     if tp_eff > 0.0 and dir_sign != 0.0 and (e_stan_in * dir_sign) < 0.0:
                         e_for_stanley = e_stan_in * (1.0 - E_CANCEL_GAIN * _clip_scalar(tp_eff, 0.0, 1.0))
                         # Khi dang giua goc cua 1 vach (ONE_EDGE) va xe da di sat mep trong cua (|e| > 0.16),
-                        # hoac dang TIEP CAN khuc cua gat 1 vach ngoai: khong de phan hoi Stanley nguoc chieu be lai nguoc han sang phia ngoai dam vao tuong ngoai
+                        # khong de phan hoi Stanley nguoc chieu be lai nguoc han sang phia ngoai dam vao tuong ngoai
                         single_only_segs = (self.left_segments or self.right_segments) if not has_both_edges_now else None
                         single_dx_span = (
                             abs(float(single_only_segs[-1]["p2"][0] - single_only_segs[0]["p1"][0]))
@@ -5458,12 +5631,14 @@ class LaneDetector:
                             else 0.0
                         )
                         is_single_sweeping_wall = (not has_both_edges_now) and (single_dx_span >= wT * 0.42)
-                        if not has_both_edges_now and (zone_now in ("APPROACH", "TURN_NOW") or is_single_sweeping_wall):
-                            tp_opp = max(float(turn_prog), 0.35 if zone_now == "APPROACH" else 0.70)
-                            e_for_stanley *= (1.0 - 0.72 * _smoothstep(0.18, 0.55, tp_opp))
-                            e_cap = 0.12 if (zone_now == "TURN_NOW" or (is_single_sweeping_wall and turn_prog >= 0.32)) else 0.18
-                            if abs(e_for_stanley) > e_cap:
-                                e_for_stanley = math.copysign(e_cap + 0.15 * (abs(e_for_stanley) - e_cap), e_for_stanley)
+                        if (
+                            not has_both_edges_now
+                            and (zone_now in ("APPROACH", "TURN_NOW") or is_single_sweeping_wall)
+                            and turn_prog >= 0.40
+                            and (heading_rad * dir_sign) >= -0.02
+                            and abs(e_for_stanley) > 0.16
+                        ):
+                            e_for_stanley = math.copysign(0.16 + 0.15 * (abs(e_for_stanley) - 0.16), e_for_stanley)
                     # Che do CUNG TRON: chi bat khi curvature ground-plane (kappa_ff) du lon, cung dau voi PP,
                     # khong o vung goc cua (APPROACH/TURN_NOW) va turn_prog thap -> khong anh huong goc 90 do / S-curve nhe.
                     arc_w = 0.0
@@ -5493,25 +5668,34 @@ class LaneDetector:
                         _smoothstep(0.10, 0.50, float(turn_prog)),
                         _smoothstep(4.0, 11.0, abs(math.degrees(pp_rad))),
                     )
-                    raw_straight_rad = 0.72 * stanley_rad + 0.28 * pp_rad
+                    raw_straight_rad = 0.74 * stanley_rad + 0.26 * pp_rad
                     raw_curve_rad = pp_rad + W_STANLEY_FB * stanley_rad
                     raw_steer_rad = (1.0 - mix_curve) * raw_straight_rad + mix_curve * raw_curve_rad
                     raw_wheel_deg = math.degrees(raw_steer_rad)
-                    if (
-                        not has_both_edges_now
-                        and dir_sign != 0.0
-                        and (raw_wheel_deg * dir_sign) < 0.0
-                        and (zone_now in ("APPROACH", "TURN_NOW") or turn_now_flag)
-                        and (turn_ang >= 40.0 or is_single_sweeping_wall)
-                    ):
-                        # Khong bao gio danh lai nguoc huong cua khi chi con 1 vach ngoai ngay truoc khuc cua gat
-                        max_opp_deg = 0.0 if (zone_now == "TURN_NOW" or turn_now_flag) else 1.5
-                        if abs(raw_wheel_deg) > max_opp_deg:
-                            raw_wheel_deg = -dir_sign * max_opp_deg
 
                     heading_deg_out = math.degrees(heading_rad)
+                    if (
+                        fresh_observation
+                        and has_both_edges_now
+                        and not turn_now_flag
+                        and zone_now == "NONE"
+                        and right_outer_bias == 0.0
+                        and abs(heading_deg_out) < 8.0
+                        and abs(e_norm_out) < 0.45
+                    ):
+                        self._straight_e_int = _clip_scalar(
+                            float(getattr(self, "_straight_e_int", 0.0)) + 0.18 * float(dt_step) * e_norm_pred,
+                            -0.14,
+                            0.14,
+                        )
+
                     steer_cap_norm = STRAIGHT_STEER_CAP + (1.0 - STRAIGHT_STEER_CAP) * mix_curve
-                    raw_steer_norm = _clip_scalar(raw_wheel_deg / 35.0, -steer_cap_norm, steer_cap_norm)
+                    trim_straight = float(getattr(self, "_straight_e_int", 0.0)) if (
+                        has_both_edges_now and not turn_now_flag and right_outer_bias == 0.0
+                    ) else 0.0
+                    raw_steer_norm = _clip_scalar(raw_wheel_deg / 35.0 + trim_straight, -steer_cap_norm, steer_cap_norm)
+                    if right_outer_bias > 0.0:
+                        raw_steer_norm = max(raw_steer_norm, -0.42)
                     if fresh_observation and self._smooth_steer_norm is not None:
                         if raw_steer_norm * self._smooth_steer_norm < -0.25 and abs(raw_steer_norm - self._smooth_steer_norm) > 0.65:
                             steer_norm_out = float(0.70 * raw_steer_norm + 0.30 * self._smooth_steer_norm)
@@ -5844,13 +6028,6 @@ class LaneDetector:
         light_mode = lighting_info["mode"]
         roi_scope = "ROI-ONLY" if (restrict_roi or profile == "highway") else "WIDE-CORNER"
         if draw_overlay:
-            if points is not None:
-                pts_roi = np.asarray(points, dtype=np.int32)
-                if pts_roi.shape == (4, 2):
-                    poly_roi = np.array([pts_roi[0], pts_roi[1], pts_roi[3], pts_roi[2]], dtype=np.int32)
-                    cv2.polylines(img_result, [poly_roi], isClosed=True, color=(0, 255, 255), thickness=1, lineType=cv2.LINE_AA)
-                    for pr in pts_roi:
-                        cv2.circle(img_result, (int(pr[0]), int(pr[1])), 3, (0, 0, 255), cv2.FILLED, cv2.LINE_AA)
             if profile == "robot":
                 cv2.putText(
                     img_result,
